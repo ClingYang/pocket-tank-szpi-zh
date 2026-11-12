@@ -379,6 +379,7 @@ static void fish_beat(fish_t *f, float dt) {
 void tank_fish_face(fish_t *f) {
     f->facing = cosf(f->heading) < 0 ? -1 : 1;
     f->yaw = f->yaw_tail = f->facing; f->behind = 0;
+    f->steering_velocity = f->yaw_velocity = 0;
     f->pitch_b = f->pitch_t = fish_pitch(f); f->pitch_bv = f->pitch_tv = f->yaw_tv = 0; f->speed_t = f->speed;
 }
 
@@ -4027,6 +4028,17 @@ static void update_fish(tank_t *t, int idx, float dt) {
         touch_speed = -1; hes_speed = -1;
     }
     bool urgent = agile || (t->ravenous && f->hunger > 6.5f) || (t->startled && touch_speed >= 55) || f->bolt_home || follow >= 0;
+#ifdef TANK_SZPI
+    urgent = agile || (t->ravenous && f->hunger > 6.5f) || (t->startled && touch_speed >= 55) || f->bolt_home;
+    float side_margin = 32 * f->size + 18, wall_slowdown = 1;
+    if (!through) {
+        float left = clampf((side_margin - f->x) / side_margin, 0, 1);
+        float right = clampf((f->x - (TANK_W - side_margin)) / side_margin, 0, 1);
+        desired = atan2f(sinf(desired), cosf(desired) + 2.5f * (left * left - right * right));
+        float edge_distance = f->yaw < 0 ? f->x : TANK_W - f->x;
+        wall_slowdown = clampf((edge_distance - 15 * f->size) / (side_margin - 15 * f->size), 0.10f, 1);
+    }
+#endif
     /* a breather settled in its fronds has nowhere to go: it hovers on the side it came in on (0.3.9.3, the
      * square's "fish spinning in the corner" - within 10 px of its spot the steering let go, the old way lay
      * behind it, and it turned, drifted off, steered back and turned again: ~30 turns in 100 s) */
@@ -4038,26 +4050,57 @@ static void update_fish(tank_t *t, int idx, float dt) {
     bool at_spot = tg.valid && tank_dist(f->x, f->y, tg.x, tg.y) < 30;
     float commit = urgent ? 0 : ringing ? 0.2f    /* at the finger: a fish that slipped past turns back to it at once */
                  : lerpf(2.0f, 0.3f, clampf((f->speed - 10) * (1 / 25.0f), 0, 1)) + (at_spot ? 1.2f : 0);
+#ifdef TANK_SZPI
+    if (!through && (f->x < side_margin || f->x > TANK_W - side_margin)) commit = fminf(commit, 0.2f);
+#endif
     if (behind && f->behind >= commit) {
         f->facing = (int8_t)-f->facing;
         f->heading = norm_ang(3.14159f - f->heading);   /* the climb or dive kept */
+        f->steering_velocity = -f->steering_velocity;
         f->behind = urgent ? 0 : -TURN_SETTLE;
     }
     bool glancing = f->behind > 0;       /* the way is behind, the turn not yet committed */
     if (cosf(desired) * f->facing < 0)   /* on its own side until it turns */
         desired = atan2f(sinf(desired), f->facing * fabsf(cosf(desired)));
     float turn_rate = f->turn_rate * tank_form_turn(f);  /* its form's feel (0.4); exactly f->turn_rate for a classic */
-    float turn = clampf(norm_ang(desired - f->heading), -turn_rate * dt, turn_rate * dt);
+    float heading_error = norm_ang(desired - f->heading);
+#ifdef TANK_SZPI
+    float wanted_turn = clampf(heading_error * 3.0f, -turn_rate, turn_rate);
+    float angular_acceleration = turn_rate * (urgent ? 5.0f : 3.0f);
+    f->steering_velocity += clampf(wanted_turn - f->steering_velocity,
+                                  -angular_acceleration * dt, angular_acceleration * dt);
+    float turn = f->steering_velocity * dt;
+    if (turn * heading_error > 0 && fabsf(turn) > fabsf(heading_error)) {
+        turn = heading_error;
+        f->steering_velocity = 0;
+    }
+#else
+    float turn = clampf(heading_error, -turn_rate * dt, turn_rate * dt);
+#endif
     f->heading = norm_ang(f->heading + turn);
     /* the yaw follows the side: a full turn in ~0.5 s at mira's turn rate
      * (bolt 0.4, nori 0.7), quicker with urgency; a glance is 40% of one.
      * The tail follows the head a beat behind (tank_fish_trail) */
     float hc = cosf(f->heading);
     float face = f->facing * (glancing ? 0.6f : 1.0f);
+#ifdef TANK_SZPI
+    float yaw_frequency = urgent ? 11.0f : 6.5f + f->goal.urgency * 0.22f;
+    int turn_steps = (int)(dt * 120) + 1;
+    float turn_dt = dt / turn_steps;
+    for (int step = 0; step < turn_steps; step++) {
+        spring(&f->yaw, &f->yaw_velocity, face, yaw_frequency, 1.0f, turn_dt);
+    }
+    if (f->yaw > 1) { f->yaw = 1; f->yaw_velocity = 0; }
+    if (f->yaw < -1) { f->yaw = -1; f->yaw_velocity = 0; }
+#else
     float yrate = turn_rate * 1.2f * (1 + f->goal.urgency * 0.06f) * dt;
     f->yaw += clampf(face - f->yaw, -yrate, yrate);
+#endif
     float want = touch_speed >= 0 ? touch_speed : hes_speed >= 0 ? hes_speed : tg.speed * ugain;
     f->target_speed = want * (f->energy < 1.2f && f->breather <= 0 ? 0.45f : 1) * (glancing ? 0.6f : 1);
+#ifdef TANK_SZPI
+    f->target_speed *= wall_slowdown;
+#endif
     if (through) f->target_speed = f->bolt_home ? DOOR_BOLT_SPEED : DOOR_SWIM_SPEED;        /* through a doorway at a swim, never a dawdle (the hand-off waits LINK_CROSS_MS) */
     /* swimming through a canopy is slow going (a fleeing fish crashes through) */
     if (f->goal.id != GOAL_FLEE_SHADOW)

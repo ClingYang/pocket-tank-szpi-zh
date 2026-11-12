@@ -1,0 +1,140 @@
+{
+  "date": "2026-11-12",
+  "idf": "6.0.2",
+  "model": {
+    "file": "model/out/model_q4.bin",
+    "bytes": 7557640,
+    "sha256": "50bed3e16a6b11f3496dde21d8784da9067f40ec9f0a77cf97f60a95acb80f6b",
+    "matches_upstream": true,
+    "fits_partition": true
+  },
+  "tokenizer_matches": true,
+  "config": {
+    "szpi": true,
+    "octal_psram": true,
+    "flash_16mb": true,
+    "cpu_240mhz": true
+  },
+  "flash_includes_model": true,
+  "display_sources": [
+    "display_port_szpi.c"
+  ],
+  "viewport": {
+    "width": 320,
+    "height": 240,
+    "margin_left": 0,
+    "margin_right": 0,
+    "world": [
+      480,
+      360
+    ],
+    "raster": "native 320x240 text and fish",
+    "sample_first": [
+      0,
+      0
+    ],
+    "sample_last": [
+      478,
+      358
+    ]
+  },
+  "hardware_tested": true,
+  "build": {
+    "command": "python tools/idf_szpi.py build",
+    "exit_code": 0,
+    "incremental_exit_code": 0,
+    "final_exit_code": 0
+  },
+  "app": {
+    "file": "firmware/build-szpi/pocket_tank.bin",
+    "bytes": 2428928,
+    "sha256": "381cb355bb51b049707e1d707be2d398c3e99f7f9e5ab502973ac7d82221404e",
+    "board_magic": "PTBOARD",
+    "board": "szpi-s3",
+    "partition_bytes": 2621440,
+    "free_bytes": 192512,
+    "image_declares_idf602": true,
+    "signature_verified": true
+  },
+  "public_archive": {
+    "pages": 26,
+    "images": 156,
+    "reference_code_files": 17,
+    "images_format_validated": true
+  },
+  "localization": {
+    "catalog_entries": 647,
+    "glyphs": 6832,
+    "font": "Fusion Pixel 2026.11.10",
+    "name_input": "Latin letter wheel",
+    "population_cap": 3,
+    "required_ui_glyphs": 763,
+    "missing_glyphs": 0,
+    "waters_combinations": 4096,
+    "max_waters_utf8_bytes": 15,
+    "waters_buffer_bytes": 16,
+    "format_arguments": "passed",
+    "catalog_idempotent": true,
+    "source_audit": "UI literals, firmware-provided library rows, label tables, generated names, UTF-8 layout",
+    "settings_native_capture": ".mklink/localization-page-0.png",
+    "shelf_native_capture": ".mklink/localization-page-1.png",
+    "screen_checks": {
+      "settings": "passed native framebuffer inspection",
+      "shelf": "passed native framebuffer inspection",
+      "other_changed_pages": "source checked, visual inspection pending"
+    },
+    "runtime_smoke": {
+      "frames": 1015,
+      "fps": 22.7,
+      "worst_frame_ms": 55,
+      "over_66ms": 0,
+      "over_100ms": 0,
+      "fish_count": 2,
+      "volume_percent": 0
+    }
+  },
+  "hardware": {
+    "port": "COM33",
+    "chip": "ESP32-S3 v0.2",
+    "flash_mb": 16,
+    "psram_mb": 8,
+    "lcd": "ST7789 320x240",
+    "lcd_colour_test": "user confirmed",
+    "touch": "user confirmed",
+    "default_volume": 0,
+    "final_flash_verified": true,
+    "previous_accepted_app": {
+      "file": "firmware/build-szpi/pocket_tank.bin",
+      "bytes": 2428928,
+      "sha256": "1dc4c3dcc7e66a7f94578dbc92993951a6f03b660d7df06ba8834896af021ae0",
+      "board_magic": "PTBOARD",
+      "board": "szpi-s3",
+      "partition_bytes": 2621440,
+      "free_bytes": 192512,
+      "image_declares_idf602": true,
+      "signature_verified": true
+    },
+    "current_app_status": "flashed, booted, settings and shelf native screenshots verified",
+    "current_boot_elf_sha256": "f9fe2911ac97a42c8605ba089cda6913f4bb7e66a078830c0ee7ee553d45196f",
+    "volume_verified": 0,
+    "current_capture": "../.mklink/localization-uart.csv"
+  },
+  "runtime_benchmark": {
+    "frames": 6255,
+    "fps": 22.8,
+    "worst_frame_ms": 54,
+    "over_66ms": 0,
+    "over_100ms": 0,
+    "fish_count": 2,
+    "logs": "quiet",
+    "capture": "../.mklink/board-test-20261111/uart-release.csv",
+    "firmware_sha256": "1dc4c3dcc7e66a7f94578dbc92993951a6f03b660d7df06ba8834896af021ae0",
+    "scope": "previous user-accepted animation firmware"
+  },
+  "user_confirmation": {
+    "official_lcd_colour_test": true,
+    "display_and_touch": true,
+    "final_motion": "已顺畅，可以保留这一版"
+  },
+  "serial_released": true
+}

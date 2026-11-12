@@ -28,3 +28,7 @@ if(NOT PT_GIT_DIR)
 endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PT_GIT_DIR}/HEAD ${PT_GIT_DIR}/index)
 project(pocket_tank)
+if(CONFIG_POCKET_TANK_SZPI)
+    # Include the actual trained brain in a normal `idf.py flash` operation.
+    esptool_py_flash_target_image(flash model 0x290000 "${CMAKE_CURRENT_LIST_DIR}/../model/out/model_q4.bin")
+endif()

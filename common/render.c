@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* render.c — porthole look: deep gradient water, AMOLED-black floor, procedural
  * fish (body polygon + animated tail + earned markings), bubbles, seagrass
  * the keeper trims. Everything is drawn
@@ -30,14 +31,21 @@ static double tap_press(const tank_t *t) { return g_tap_press_on && g_tap_press 
 /* a draw target: fb + stride + night dim, plus the window it covers in tank
  * coordinates (ox,oy,w,h) - the frame is (0,0,TANK_W,TANK_H); the stats card
  * cache is a small sprite that still gets drawn in tank coordinates */
-typedef struct { uint16_t *fb; int stride; float dim; int ox, oy, w, h; } ctx_t;
+typedef struct render_context {
+    uint16_t *fb;
+    int stride;
+    float dim;
+    int ox, oy, w, h;
+    const struct render_context *native_parent;
+    int screen_offset_x, screen_offset_y;
+} ctx_t;
 /* every draw target made outside the keeper page counts: the page keeps a framebuffer only while nothing else drew
    (THE PAGE KEPT, render_milestones) */
 static unsigned g_ctx_other; static bool g_ms_in;
 #define CTX_MADE() do { if (!g_ms_in) g_ctx_other++; } while (0)
 static ctx_t ctx_full(uint16_t *fb, int stride, float dim) {
     CTX_MADE();
-    ctx_t c = { fb, stride, dim, 0, 0, TANK_W, TANK_H }; return c;
+    ctx_t c = { fb, stride, dim, 0, 0, TANK_W, TANK_H, NULL, 0, 0 }; return c;
 }
 /* PAGE space (render.h): the full-screen pages, the prompts and the exported
  * drawing helpers put their 448 x 368 layout in the middle of the frame - a
@@ -45,12 +53,26 @@ static ctx_t ctx_full(uint16_t *fb, int stride, float dim) {
 static bool g_dirty_hold;                          /* below, with the dirty mask */
 static ctx_t ctx_page(uint16_t *fb, int stride) {
     CTX_MADE();
-    ctx_t c = { fb, stride, 1.0f, -PAGE_X, -PAGE_Y, TANK_W, TANK_H };
+    ctx_t c = { fb, stride, 1.0f, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, NULL, 0, 0 };
+    c.screen_offset_x = PAGE_X;
+    c.screen_offset_y = PAGE_Y;
     g_dirty_hold = true;                           /* a page's coordinates must never reach the mask */
     return c;
 }
 #define CTX_IN(c, x, y) ((unsigned)((x) - (c)->ox) < (unsigned)(c)->w && (unsigned)((y) - (c)->oy) < (unsigned)(c)->h)
 #define CTX_PX(c, x, y) ((c)->fb[((y) - (c)->oy) * (c)->stride + ((x) - (c)->ox)])
+
+#ifdef TANK_SZPI
+static ctx_t ctx_native(const ctx_t *parent) {
+    ctx_t native = *parent;
+    native.native_parent = parent;
+    native.ox = native.oy = 0;
+    native.w = 320; native.h = 240;
+    return native;
+}
+static int native_world_x(const ctx_t *c, int x) { return x * 3 / 2 - c->native_parent->screen_offset_x; }
+static int native_world_y(const ctx_t *c, int y) { return y * 3 / 2 - c->native_parent->screen_offset_y; }
+#endif
 
 /* Dirty mask (2026-09-01): one bit per pixel, set by everything drawn over
  * the baked scene (px, span, blends), cleared every frame. The porthole
@@ -435,6 +457,12 @@ static inline void bg_mark(int x0, int x1, int y) {
     if (y < g_sg_top) g_sg_top = y;
 }
 static void px(ctx_t *c, int x, int y, uint16_t col) {
+#ifdef TANK_SZPI
+    if (c->native_parent) {
+        if (CTX_IN(c, x, y)) px((ctx_t *)c->native_parent, native_world_x(c, x), native_world_y(c, y), col);
+        return;
+    }
+#endif
     if (CTX_IN(c, x, y)) {
         CTX_PX(c, x, y) = FB_SWAP16(col);
         bb_add(x, x, y);
@@ -462,6 +490,12 @@ static inline void blend565(uint16_t *p, const src_t *s, int a) {
     *p = FB_SWAP16((uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)));
 }
 static inline void px_blend_s(ctx_t *c, int x, int y, const src_t *s, int a) {
+#ifdef TANK_SZPI
+    if (c->native_parent) {
+        if (CTX_IN(c, x, y)) px_blend_s((ctx_t *)c->native_parent, native_world_x(c, x), native_world_y(c, y), s, a);
+        return;
+    }
+#endif
     if (CTX_IN(c, x, y) && !under_bg(x, y)) { blend565(&CTX_PX(c, x, y), s, a); bb_add(x, x, y); dirty_px(x, y); TOUCH_PX(c, x, y); }   /* (bb_add: the fish's box and SWIM DEPTH's marks see blends too) */
 }
 /* alpha 0..255 blend onto existing pixel (one-off pixels; shapes hoist) */
@@ -475,6 +509,18 @@ static inline void span(ctx_t *c, int x0, int x1, int y, const src_t *s, int alp
     if (x0 < c->ox) x0 = c->ox;
     if (x1 > c->ox + c->w - 1) x1 = c->ox + c->w - 1;
     if (x0 > x1) return;
+#ifdef TANK_SZPI
+    if (c->native_parent) {
+        int world_y = native_world_y(c, y);
+        for (int x = x0; x <= x1; x++) {
+            int world_x = native_world_x(c, x);
+            if (g_under && under_bg(world_x, world_y)) continue;
+            if (alpha >= 255) px((ctx_t *)c->native_parent, world_x, world_y, s->v);
+            else px_blend_s((ctx_t *)c->native_parent, world_x, world_y, s, alpha);
+        }
+        return;
+    }
+#endif
     if (g_under) {                                   /* under the cached grass: pixel by pixel, only what shows (marking the rest would vignette the grass twice) */
         uint16_t *q = &CTX_PX(c, x0, y); uint16_t sv = FB_SWAP16(s->v);
         for (int x = x0; x <= x1; x++, q++) { if (under_bg(x, y)) continue; if (alpha >= 255) *q = sv; else blend565(q, s, alpha); dirty_px(x, y); TOUCH_PX(c, x, y); }
@@ -500,6 +546,26 @@ static float ell_half(float t) {
 static void fill_ellipse(ctx_t *c, float cx, float cy, float rx, float ry,
                          uint32_t rgb, int alpha) {
     src_t s = src_color(rgb, c->dim);
+#ifdef TANK_SZPI
+    if (c->native_parent) {
+        if (rx <= 0 || ry <= 0) return;
+        float inv_x = 1 / (rx * rx), inv_y = 1 / (ry * ry);
+        for (int y = (int)floorf(cy - ry); y < (int)ceilf(cy + ry); y++) {
+            for (int x = (int)floorf(cx - rx); x < (int)ceilf(cx + rx); x++) {
+                int inside = 0;
+                for (int sy = 0; sy < 2; sy++) {
+                    float dy = y + 0.25f + sy * 0.5f - cy;
+                    for (int sx = 0; sx < 2; sx++) {
+                        float dx = x + 0.25f + sx * 0.5f - cx;
+                        inside += dx * dx * inv_x + dy * dy * inv_y <= 1;
+                    }
+                }
+                if (inside) span(c, x, x, y, &s, (alpha * inside + 2) / 4);
+            }
+        }
+        return;
+    }
+#endif
     int y0 = (int)(cy - ry), y1 = (int)(cy + ry);
     for (int y = y0; y <= y1; y++) {
         float w = ell_half((y - cy) / ry);
@@ -524,16 +590,31 @@ static void fill_poly_a(ctx_t *c, const float *xs, const float *ys, int n, uint3
     for (int i = 0; i < n; i++) { if (ys[i] < miny) miny = ys[i]; if (ys[i] > maxy) maxy = ys[i]; }
     src_t s = src_color(rgb, c->dim);
     for (int y = (int)miny; y <= (int)maxy; y++) {
+        float scan_y = y;
+#ifdef TANK_SZPI
+        if (c->native_parent) scan_y += 0.5f;
+#endif
         float x0 = 1e9f, x1 = -1e9f;
         for (int i = 0; i < n; i++) {
             int j = (i + 1) % n;
             float ay = ys[i], by = ys[j];
-            if ((ay <= y && by > y) || (by <= y && ay > y)) {
-                float x = xs[i] + (xs[j] - xs[i]) * (y - ay) / (by - ay);
+            if ((ay <= scan_y && by > scan_y) || (by <= scan_y && ay > scan_y)) {
+                float x = xs[i] + (xs[j] - xs[i]) * (scan_y - ay) / (by - ay);
                 if (x < x0) x0 = x;
                 if (x > x1) x1 = x;
             }
         }
+#ifdef TANK_SZPI
+        if (c->native_parent && x0 <= x1) {
+            int left = (int)floorf(x0), right = (int)floorf(x1);
+            if (left == right) span(c, left, right, y, &s, (int)(alpha * (x1 - x0)));
+            else {
+                span(c, left, left, y, &s, (int)(alpha * (left + 1 - x0)));
+                span(c, left + 1, right - 1, y, &s, alpha);
+                span(c, right, right, y, &s, (int)(alpha * (x1 - right)));
+            }
+        } else
+#endif
         span(c, (int)x0, (int)x1, y, &s, alpha);
     }
 }
@@ -554,8 +635,12 @@ static uint32_t mix(uint32_t a, uint32_t b, float p) {
  * yaw leads and the tail's follows, blended along the body, so mid-turn it
  * bends. Eased here so the swing starts and lands softly. */
 static float yaw_ease(float y) { return y * (1.5f - 0.5f * y * y); }
+#ifdef TANK_SZPI
+#define YAW_MIN 0.01f
+#else
 #define YAW_MIN 0.06f                    /* the outline never folds to a line (the body's
                                          * thickness is drawn on its own: FISH_THICK) */
+#endif
 #define FISH_THICK 4.2f                  /* half the body's thickness, local px: turned toward
                                          * the glass a fish shows a rounded oval, not a card */
 /* the yaw at body point lx: the tail's at the tail tip (-26), the head's at the nose (16) */
@@ -744,7 +829,32 @@ static void fish_fit(fish_t *f, float x, float y, float size, float room) {
  * previews pass none) - nose up, a fish close to it lifts off level */
 /* `beat`: the tail beat's phase - in the tank the fish's own (fish_t.beat, run on by the swim), in a preview the clock's at
  * the preview's pace (draw_still) */
+#ifdef TANK_SZPI
+static void fish_detail_line(ctx_t *c, float x0, float y0, float x1, float y1, uint32_t rgb, int alpha) {
+    float dx = x1 - x0, dy = y1 - y0;
+    float length = sqrtf(dx * dx + dy * dy);
+    if (length < 0.1f) return;
+    float nx = -dy * 0.5f / length, ny = dx * 0.5f / length;
+    float xs[4] = {x0 + nx, x1 + nx, x1 - nx, x0 - nx};
+    float ys[4] = {y0 + ny, y1 + ny, y1 - ny, y0 - ny};
+    fill_poly_a(c, xs, ys, 4, rgb, alpha);
+}
+#endif
 static void draw_fish_core(ctx_t *c, const fish_t *f, float beat, bool asleep, float mark, float floor_y) {
+#ifdef TANK_SZPI
+    ctx_t native;
+    fish_t native_fish;
+    if (!c->native_parent) {
+        native = ctx_native(c);
+        native_fish = *f;
+        native_fish.x = (f->x + c->screen_offset_x) * (2.0f / 3);
+        native_fish.y = (f->y + c->screen_offset_y) * (2.0f / 3);
+        native_fish.size *= 2.0f / 3;
+        floor_y = (floor_y + c->screen_offset_y) * (2.0f / 3);
+        mark *= 2.0f / 3;
+        c = &native; f = &native_fish;
+    }
+#endif
     const fish_form_t *fm = &FORMS[f->shape < SHAPE_N ? f->shape : 0];
     const float H = fm->h;
     int fins = f->fins < FINS_N ? f->fins : 0;
@@ -803,17 +913,54 @@ static void draw_fish_core(ctx_t *c, const fish_t *f, float beat, bool asleep, f
             float xs[4], ys[4];
             for (int i = 0; i < fp[k].n; i++) { xs[i] = TX(fp[k].x[i], fp[k].y[i]); ys[i] = TY(fp[k].x[i], fp[k].y[i]); }
             fill_poly(c, xs, ys, fp[k].n, fin);
+#ifdef TANK_SZPI
+            for (int ray = 1; ray <= 3; ray++) {
+                float u = ray * 0.25f;
+                float lx = fp[k].x[1] + (fp[k].x[fp[k].n - 1] - fp[k].x[1]) * u;
+                float ly = fp[k].y[1] + (fp[k].y[fp[k].n - 1] - fp[k].y[1]) * u;
+                fish_detail_line(c, xs[0], ys[0], TX(lx, ly), TY(lx, ly), mix(fin, 0xffffff, 0.35f), 100);
+            }
+#endif
         }
     }
-    /* body */
-    {
-        float xs[10], ys[10];
-        for (int i = 0; i < 10; i++) { xs[i] = TX(fm->x[i], fm->y[i]); ys[i] = TY(fm->x[i], fm->y[i]); }
-        fill_poly(c, xs, ys, 10, body);
-        /* its thickness: the cross-section at the deepest point, widening as
-         * the fish turns toward the glass (sin of the yaw angle) */
-        float sm = yaw_at(yh, yt, 2), rx = FISH_THICK * f->size * sqrtf(fmaxf(0, 1 - sm * sm));
-        if (rx >= 1) fill_ellipse(c, TX(2, 0), TY(2, 0), rx, 9.5f * (H / 10) * f->size, body, 255);
+    /* A smooth silhouette and horizontal light bands give the flank volume. */
+    float body_x[20], body_y[20];
+#ifdef TANK_SZPI
+    const int body_points = 20;
+    for (int i = 0; i < 10; i++) {
+        int previous = (i + 9) % 10, next = (i + 1) % 10, after = (i + 2) % 10;
+        body_x[2 * i] = fm->x[i]; body_y[2 * i] = fm->y[i];
+        body_x[2 * i + 1] = (9 * (fm->x[i] + fm->x[next]) - fm->x[previous] - fm->x[after]) / 16;
+        body_y[2 * i + 1] = (9 * (fm->y[i] + fm->y[next]) - fm->y[previous] - fm->y[after]) / 16;
+    }
+    for (int band = 0; band < 12; band++) {
+        float low = -H + band * H / 6, high = low + H / 6 + 0.15f;
+        float ax[32], ay[32], bx[32], by[32];
+        int points = clip_side(body_x, body_y, body_points, 1, low, 0, low, ax, ay);
+        if (points < 3) continue;
+        points = clip_side(ax, ay, points, 0, high, 1, high, bx, by);
+        if (points < 3) continue;
+        float level = (low + high) / (2 * H);
+        float lighting = 0.68f + 0.32f * (1 - level * level) - 0.07f * level;
+        float reflection = fmaxf(0, 1 - fabsf(level + 0.35f) * 3) * 0.22f;
+        uint32_t shade = mix(mix(body, 0x071c27, 1 - lighting), 0xffffff, reflection);
+        for (int i = 0; i < points; i++) { float lx = bx[i], ly = by[i]; bx[i] = TX(lx, ly); by[i] = TY(lx, ly); }
+        fill_poly(c, bx, by, points, shade);
+    }
+#else
+    const int body_points = 10;
+    memcpy(body_x, fm->x, sizeof fm->x); memcpy(body_y, fm->y, sizeof fm->y);
+    float xs[10], ys[10];
+    for (int i = 0; i < 10; i++) { xs[i] = TX(fm->x[i], fm->y[i]); ys[i] = TY(fm->x[i], fm->y[i]); }
+    fill_poly(c, xs, ys, 10, body);
+#endif
+    float sm = yaw_at(yh, yt, 2), rx = FISH_THICK * f->size * sqrtf(fmaxf(0, 1 - sm * sm));
+    if (rx >= 1) {
+        float ry = 9.5f * (H / 10) * f->size;
+        fill_ellipse(c, TX(2, 0), TY(2, 0), rx, ry, body, 255);
+#ifdef TANK_SZPI
+        fill_ellipse(c, TX(2, -H * 0.25f), TY(2, -H * 0.25f), rx * 0.68f, ry * 0.55f, 0xffffff, 36);
+#endif
     }
     /* the pattern, in the accent color. A FRY has none yet: its markings
      * come in with its first growth spurt */
@@ -846,8 +993,8 @@ static void draw_fish_core(ctx_t *c, const fish_t *f, float beat, bool asleep, f
                 const float front[4] = { ex - 0.5f, 1.3f * H, ex + 5, -1.3f * H };     /* up: keep the tail side */
                 memcpy(cut[0], back, sizeof back); memcpy(cut[1], front, sizeof front); nc = 2;
             }
-            float ax[16], ay[16], bx[16], by[16]; int n = 10;
-            memcpy(ax, fm->x, sizeof fm->x); memcpy(ay, fm->y, sizeof fm->y);
+            float ax[32], ay[32], bx[32], by[32]; int n = body_points;
+            memcpy(ax, body_x, sizeof(float) * n); memcpy(ay, body_y, sizeof(float) * n);
             for (int k = 0; k < nc && n >= 3; k++) {
                 n = clip_side(ax, ay, n, cut[k][0], cut[k][1], cut[k][2], cut[k][3], bx, by);
                 memcpy(ax, bx, sizeof(float) * n); memcpy(ay, by, sizeof(float) * n);
@@ -858,6 +1005,20 @@ static void draw_fish_core(ctx_t *c, const fish_t *f, float beat, bool asleep, f
             }
         }
     }
+#ifdef TANK_SZPI
+    float pectoral_phase = sinf(ph * 0.85f - 0.6f);
+    float pectoral_x[3] = {fm->eye_x - 4, fm->eye_x - 10 - pectoral_phase * 1.2f, fm->eye_x - 6};
+    float pectoral_y[3] = {H * 0.12f, H * (0.75f + 0.12f * pectoral_phase), H * 0.56f};
+    float fin_x[3], fin_y[3];
+    for (int i = 0; i < 3; i++) { fin_x[i] = TX(pectoral_x[i], pectoral_y[i]); fin_y[i] = TY(pectoral_x[i], pectoral_y[i]); }
+    fill_poly_a(c, fin_x, fin_y, 3, mix(fin, 0xffffff, 0.18f), 170);
+    fish_detail_line(c, fin_x[0], fin_y[0], fin_x[1], fin_y[1], mix(fin, 0xffffff, 0.35f), 110);
+    const float gx[4] = {fm->eye_x - 4, fm->eye_x - 6, fm->eye_x - 6.5f, fm->eye_x - 4.5f};
+    const float gy[4] = {-0.48f * H, -0.12f * H, 0.22f * H, 0.58f * H};
+    for (int i = 0; i < 3; i++) {
+        fish_detail_line(c, TX(gx[i], gy[i]), TY(gx[i], gy[i]), TX(gx[i + 1], gy[i + 1]), TY(gx[i + 1], gy[i + 1]), 0x102831, 85);
+    }
+#endif
     /* eye — closed to a lid line when asleep (resting at night) */
     float ex = fm->eye_x, ey = fm->eye_y;
     if (asleep) {
@@ -865,6 +1026,9 @@ static void draw_fish_core(ctx_t *c, const fish_t *f, float beat, bool asleep, f
     } else {
         fill_ellipse(c, TX(ex, ey), TY(ex, ey), 2.2f, 2.2f, 0xffffff, 255);
         fill_ellipse(c, TX(ex + 0.7f, ey), TY(ex + 0.7f, ey), 1.1f, 1.1f, 0x031015, 255);
+#ifdef TANK_SZPI
+        fill_ellipse(c, TX(ex + 0.2f, ey - 0.8f), TY(ex + 0.2f, ey - 0.8f), 0.65f, 0.65f, 0xffffff, 240);
+#endif
     }
 #undef TX
 #undef TY
@@ -878,6 +1042,11 @@ static bool g_page_animals;                      /* (the tests: the creatures dr
 void render_debug_page_animals(bool show) { g_page_animals = show; }
 static void draw_fish(ctx_t *c, const tank_t *t, const fish_t *f) {
     if (g_no_animals) return;
+#ifdef TANK_SZPI
+    fish_t detailed = *f;
+    detailed.size *= 1.35f;
+    f = &detailed;
+#endif
     ctx_t cf = *c;                                     /* its window ends at the sand line (FISH_FLOOR_Y): a fin that reaches
                                                           the floor touches it, never shows through it - nothing of a fish is
                                                           ever painted over the sand or a piece's footing (2026-10-24) */
@@ -5501,7 +5670,7 @@ static void gl_patch_rect(const tank_t *t, uint16_t *buf, int buf_y0, uint32_t *
     }
     gl_rec_t s; gl_rec_begin(&s, dm, om, j);
     g_bg_clip = true; g_bg_clip_r = *r; g_veg_cull = true; g_veg_rowclip = gl_wrow_of;
-    ctx_t cb = { buf + (size_t)(r->y0 - buf_y0) * TANK_W + r->x0, TANK_W, dim, r->x0, r->y0, wds, r->y1 - r->y0 + 1 };
+    ctx_t cb = { buf + (size_t)(r->y0 - buf_y0) * TANK_W + r->x0, TANK_W, dim, r->x0, r->y0, wds, r->y1 - r->y0 + 1, NULL, 0, 0 };
     for (int kb = 0; kb < tank_veg_beds(t); kb++) {
         const int b = bed_ord(t, kb);
         if (bed_z(t, b) != DECOR_Z_BACK) continue;
@@ -5636,7 +5805,7 @@ static int gl_bake_step(const tank_t *t, float dim, int pkz) {
             const int half = g_gl_bs.bed & 1, ry0 = half ? g_gl_y0 + g_gl_rows / 2 : g_gl_y0, ry1 = half ? g_gl_y0 + g_gl_rows - 1 : g_gl_y0 + g_gl_rows / 2 - 1;
             gl_rec_t s; gl_rec_begin(&s, dm, k >= 0 ? g_gl_omask[k] : NULL, m);
             g_bg_clip = true; g_bg_clip_r.x0 = 0; g_bg_clip_r.x1 = TANK_W - 1; g_bg_clip_r.y0 = (short)ry0; g_bg_clip_r.y1 = (short)ry1; g_veg_cull = true;
-            ctx_t cb = { dst + (size_t)(ry0 - g_gl_y0) * TANK_W, TANK_W, dim, 0, ry0, TANK_W, ry1 - ry0 + 1 };
+            ctx_t cb = { dst + (size_t)(ry0 - g_gl_y0) * TANK_W, TANK_W, dim, 0, ry0, TANK_W, ry1 - ry0 + 1, NULL, 0, 0 };
             gl_bed_draw(&cb, t, b, pkz);
             g_bg_clip = false; g_veg_cull = false;
             gl_rec_end(&s);
@@ -5849,7 +6018,7 @@ bool render_boot_grass_live(const tank_t *t, uint16_t *dst, int *y0) {
     const bool keep_rec = g_bg_rec, keep_fbg = g_fbg_on; const int keep_top = g_sg_top; const float keep_force = g_veg_clock_force;
     g_touched = NULL; g_dirty = NULL; g_under = NULL; g_fbg_on = false; g_bg_rec = false; g_om = NULL; g_veg_arch_pass = 0; g_veg_clock_force = -1;
     g_bg_clip = true; g_bg_clip_r.x0 = 0; g_bg_clip_r.x1 = TANK_W - 1; g_bg_clip_r.y0 = (short)top; g_bg_clip_r.y1 = (short)(TANK_H - 1); g_veg_cull = true;
-    ctx_t cb = { dst + (size_t)top * TANK_W, TANK_W, g_scene_dim < 0 ? 1.0f : g_scene_dim, 0, top, TANK_W, TANK_H - top };
+    ctx_t cb = { dst + (size_t)top * TANK_W, TANK_W, g_scene_dim < 0 ? 1.0f : g_scene_dim, 0, top, TANK_W, TANK_H - top, NULL, 0, 0 };
     const int pkz = g_pk_k >= 0 ? g_pc[g_pk_k].z : DECOR_Z_BACK;
     for (int kb = 0; kb < tank_veg_beds(t); kb++) { const int b = bed_ord(t, kb); if (bed_z(t, b) == DECOR_Z_BACK) gl_bed_draw(&cb, t, b, pkz); }
     g_bg_clip = false; g_veg_cull = false;
@@ -7130,7 +7299,7 @@ static void card_draw(ctx_t c, const tank_t *t, int fish_idx) {
        milestones page (and from there SETTINGS / UPGRADES), but nothing said
        so - a keeper asked Strato how to get there. The button is the sign;
        the hit box is still the card (touch ports, RENDER_CARD_H). */
-    button(&c, X + 8, Y + H - 8 - CARD_MORE_H, W - 16, CARD_MORE_H, 0x1c2f36, 0x9fd8e2, "MORE", 2);
+    button(&c, X + 8, Y + H - 8 - CARD_MORE_H, W - 16, CARD_MORE_H, 0x1c2f36, 0x9fd8e2, "详情", 2);
 }
 
 /* ---- stats card cache (2026-09-01) ----
@@ -7161,12 +7330,12 @@ static void snail_card_draw(ctx_t *c, const tank_t *t) {
     rect_edge(c, X, Y, W, H, 0x9fd8e2); rect_edge(c, X + 1, Y + 1, W - 2, H - 2, 0x1c2f36);
     const icon_t *ic = &icon_snail_upright;
     blit_icon_scaled(c, X + (W - ic->w * 2) / 2, Y + 10, ic, 2, true);
-    draw_text(c, X + (W - text_w("SNAIL", 3)) / 2, Y + 82, 3, 0xffffff, "SNAIL");
-    const char *cap = "ALGAE GRAZED SO FAR";
+    draw_text(c, X + (W - text_w("蜗牛", 3)) / 2, Y + 82, 3, 0xffffff, "蜗牛");
+    const char *cap = "累计清理藻类";
     draw_text(c, X + (W - text_w(cap, 2)) / 2, Y + 112, 2, 0x9fd8e2, cap);
     char n[24];
-    if (t->snail_grazed <= 0) snprintf(n, sizeof n, "NOTHING YET");
-    else snprintf(n, sizeof n, "%d SPOT%s", (int)t->snail_grazed, t->snail_grazed == 1 ? "" : "S");
+    if (t->snail_grazed <= 0) snprintf(n, sizeof n, "暂无记录");
+    else snprintf(n, sizeof n, "%d处%s", (int)t->snail_grazed, t->snail_grazed == 1 ? "" : "");
     draw_text(c, X + (W - text_w(n, 3)) / 2, Y + 134, 3, 0xffffff, n);
 }
 
@@ -7203,33 +7372,33 @@ static void crab_card_draw(ctx_t *c, const tank_t *t) {
             src_t sc = src_color(CR_RGB[tone], 1.0f);
             for (int yy = 0; yy < S; yy++) span(c, ox + gx * S, ox + gx * S + S - 1, oy + gy * S + yy, &sc, 255);
         }
-    draw_text(c, X + (W - text_w("STRAWBERRY CRAB", 3)) / 2, Y + 70, 3, 0xffffff, "STRAWBERRY CRAB");
+    draw_text(c, X + (W - text_w("草莓蟹", 3)) / 2, Y + 70, 3, 0xffffff, "草莓蟹");
     {   /* two counts side by side: the pellets it found, the sand dollars it dug up (0.3.9) - what they paid, not how many finds (0.3.9.1) */
         const int L = X + W / 4, R = X + 3 * W / 4;
         char n[16];
-        draw_text(c, L - text_w("PELLETS", 2) / 2, Y + 104, 2, 0x9fd8e2, "PELLETS");
-        if (t->cr_eaten == 0) snprintf(n, sizeof n, "NONE YET"); else snprintf(n, sizeof n, "%u", (unsigned)t->cr_eaten);
+        draw_text(c, L - text_w("饲料", 2) / 2, Y + 104, 2, 0x9fd8e2, "饲料");
+        if (t->cr_eaten == 0) snprintf(n, sizeof n, "暂无"); else snprintf(n, sizeof n, "%u", (unsigned)t->cr_eaten);
         draw_text(c, L - text_w(n, 3) / 2, Y + 126, 3, 0xffffff, n);
-        draw_text(c, R - text_w("SAND DOLLARS", 2) / 2, Y + 104, 2, 0x9fd8e2, "SAND DOLLARS");
-        if (t->cr_found == 0) snprintf(n, sizeof n, "NONE YET"); else snprintf(n, sizeof n, "%u", SD_CRAB_FINDS_VALUE(t->cr_found));
+        draw_text(c, R - text_w("沙币", 2) / 2, Y + 104, 2, 0x9fd8e2, "沙币");
+        if (t->cr_found == 0) snprintf(n, sizeof n, "暂无"); else snprintf(n, sizeof n, "%u", SD_CRAB_FINDS_VALUE(t->cr_found));
         draw_text(c, R - text_w(n, 3) / 2, Y + 126, 3, 0xffffff, n);
     }
-    const char *now = t->cr_find > 0 ? "FOUND A SAND DOLLAR!"
-                    : t->cr_scurry ? "RUNNING FOR COVER"
-                    : (t->cr_mode == CR_ROOST && t->cr_hide > 0) ? (t->cr_cave == 2 ? "HIDING IN THE CASTLE" : "HIDING IN THE CAVE")
-                    : t->cr_mode == CR_ROOST ? (t->cr_cave == 2 ? "ROOSTING IN THE CASTLE" : t->cr_cave == 9 ? "ROOSTING IN THE CAVE" : "ROOSTING")
-                    : t->cr_mode == CR_SHELTER ? (t->cr_cave == 2 ? "OFF TO THE CASTLE" : "OFF TO THE CAVE")
-                    : t->cr_mode == CR_DIG ? "PICKING AT THE SAND"
-                    : t->cr_mode == CR_FEED ? "GOING FOR FOOD"
-                    : t->cr_mode == CR_EAT ? "EATING"
-                    : t->cr_mode == CR_CLIMB ? "CLIMBING THE VOLCANO"
-                    : t->cr_mode == CR_WALK ? "OUT FOR A WALK" : "RESTING";
+    const char *now = t->cr_find > 0 ? "找到了一枚沙币！"
+                    : t->cr_scurry ? "正在寻找掩护"
+                    : (t->cr_mode == CR_ROOST && t->cr_hide > 0) ? (t->cr_cave == 2 ? "躲在城堡里" : "躲在洞穴里")
+                    : t->cr_mode == CR_ROOST ? (t->cr_cave == 2 ? "在城堡中休息" : t->cr_cave == 9 ? "在洞穴中休息" : "正在休息")
+                    : t->cr_mode == CR_SHELTER ? (t->cr_cave == 2 ? "前往城堡" : "前往洞穴")
+                    : t->cr_mode == CR_DIG ? "正在翻找沙子"
+                    : t->cr_mode == CR_FEED ? "正在觅食"
+                    : t->cr_mode == CR_EAT ? "正在进食"
+                    : t->cr_mode == CR_CLIMB ? "正在攀爬火山"
+                    : t->cr_mode == CR_WALK ? "正在散步" : "正在休息";
     if (t->cr_find > 0) {                         /* COLLECT (0.3.9.4, Strato: a keeper who came by the arrows takes the find from here) */
         int bx, by, bw, bh; crab_collect_box(&bx, &by, &bw, &bh);
         button(c, bx, by, bw, bh, 0x9fd8e2, 0x9fd8e2, "", 2);   /* (MSP_TEAL, lit; MSP_INK lettering - defined further down) */
-        const int tw = text_w("COLLECT", 2), lx = bx + (bw - 16 - 8 - tw) / 2;
+        const int tw = text_w("收藏", 2), lx = bx + (bw - 16 - 8 - tw) / 2;
         blit_icon(c, lx, by + (bh - 16) / 2, &icon_shop_sand_dollar_16, 255);
-        draw_text(c, lx + 16 + 8, by + (bh - 14) / 2, 2, 0x031015, "COLLECT");
+        draw_text(c, lx + 16 + 8, by + (bh - 14) / 2, 2, 0x031015, "收藏");
     } else draw_text(c, X + (W - text_w(now, 2)) / 2, Y + 162, 2, 0x9fd8e2, now);
 }
 static void urchin_card_draw(ctx_t *c, const tank_t *t) {
@@ -7247,20 +7416,20 @@ static void urchin_card_draw(ctx_t *c, const tank_t *t) {
             src_t sc = src_color(URCHIN_RGB[tone], 1.0f);
             for (int yy = 0; yy < S; yy++) span(c, ox + lx * S, ox + lx * S + S - 1, oy + ly * S + yy, &sc, 255);
         }
-    draw_text(c, X + (W - text_w("SEA URCHIN", 3)) / 2, Y + 90, 3, 0xffffff, "SEA URCHIN");
-    const char *cap = "GRASS GRAZED SO FAR";
+    draw_text(c, X + (W - text_w("海胆", 3)) / 2, Y + 90, 3, 0xffffff, "海胆");
+    const char *cap = "累计啃食水草";
     draw_text(c, X + (W - text_w(cap, 2)) / 2, Y + 118, 2, 0x9fd8e2, cap);
     char n[24]; int cm = (int)(t->urchin_grazed_px / PX_PER_CM);
     /* CM under a meter, then M with one decimal, KM past a kilometer (0.3.9,
        Strato: "1.4K CM is odd"); the longest line, "999.9 M", fits the card */
-    if (cm < 1) snprintf(n, sizeof n, "NOTHING YET");
-    else if (cm < 100) snprintf(n, sizeof n, "%d CM", cm);
-    else if (cm < 100000) snprintf(n, sizeof n, "%d.%d M", cm / 100, cm % 100 / 10);
-    else snprintf(n, sizeof n, "%d.%d KM", cm / 100000, cm % 100000 / 10000);
+    if (cm < 1) snprintf(n, sizeof n, "暂无记录");
+    else if (cm < 100) snprintf(n, sizeof n, "%d厘米", cm);
+    else if (cm < 100000) snprintf(n, sizeof n, "%d.%d米", cm / 100, cm % 100 / 10);
+    else snprintf(n, sizeof n, "%d.%d千米", cm / 100000, cm % 100000 / 10000);
     draw_text(c, X + (W - text_w(n, 3)) / 2, Y + 140, 3, 0xffffff, n);
-    const char *now = tank_urchin_chewing(t) ? "CHEWING"
-                    : t->urchin_frond >= 0 ? "OFF TO THE TALL GRASS"
-                    : "RESTING";
+    const char *now = tank_urchin_chewing(t) ? "正在啃食"
+                    : t->urchin_frond >= 0 ? "前往高水草"
+                    : "正在休息";
     draw_text(c, X + (W - text_w(now, 2)) / 2, Y + 170, 2, 0x9fd8e2, now);
 }
 
@@ -7270,7 +7439,7 @@ static void urchin_card_draw(ctx_t *c, const tank_t *t) {
    stamp, the machine line at the foot. Its home is named by its badge's SHAPE
    in words as well as drawn (never colour alone). */
 static void rect_fill(ctx_t *c, int x, int y, int w, int h, uint32_t rgb);   /* below */
-static const char *const BADGE_WORDS[LINK_BADGES] = { "CIRCLE", "TRIANGLE", "SQUARE", "DIAMOND" };
+static const char *const BADGE_WORDS[LINK_BADGES] = { "圆形", "三角形", "方形", "菱形" };
 /* HOME on a passport (2026-11-01, Strato): its HOME WATERS (passport_home_waters, from the tank's ID - the badge's shape is only
    who is next door now), or a renamed tank's own name with its waters small in the label - two SAM'S REEFs still differ */
 static void home_fields(uint32_t home, const char *name, const char *lbl0, char *lbl, size_t ln, char *val, size_t vn) {
@@ -7289,7 +7458,7 @@ static void passport_card_draw(ctx_t *c, uint16_t *fb, int stride, const tank_t 
         for (int x = X + 3; x < X + W - 3; x++) px_blend(c, x, y + (int)(2.0f * sinf(x * 0.11f + y * 0.37f)), 0x2b4a63, 80);
     src_t band = src_color(INK, 1.0f);
     for (int y = Y; y < Y + 26; y++) span(c, X, X + W - 1, y, &band, 255);
-    const char *title = "POCKET TANK PASSPORT";
+    const char *title = "口袋鱼缸访客护照";
     draw_text(c, X + (W - text_w(title, 2)) / 2, Y + 7, 2, GOLD, title);
     rect_edge(c, X, Y, W, H, GOLD); rect_edge(c, X + 1, Y + 1, W - 2, H - 2, INK);
     /* the photo */
@@ -7300,14 +7469,14 @@ static void passport_card_draw(ctx_t *c, uint16_t *fb, int stride, const tank_t 
     const int FX = PX + PW + 12;
     int vb = t->vis_badge[k];
     char home[24], hlbl[40], form[24], here[24];
-    home_fields(t->vis_home[k], t->vis_home_name[k], "HOME", hlbl, sizeof hlbl, home, sizeof home);
-    snprintf(form, sizeof form, "%s %s", SHAPE_NAMES[f->shape % SHAPE_N], FINS_NAMES[f->fins % FINS_N]);
+    home_fields(t->vis_home[k], t->vis_home_name[k], "家园", hlbl, sizeof hlbl, home, sizeof home);
+    snprintf(form, sizeof form, "%s %s", ui_zh_label(SHAPE_NAMES[f->shape % SHAPE_N]), ui_zh_label(FINS_NAMES[f->fins % FINS_N]));
     float s = (float)(t->clock - t->vis_since[k]);
-    if (f->homeward) snprintf(here, sizeof here, "HEADING HOME");
-    else if (s < 60) snprintf(here, sizeof here, "JUST ARRIVED");
-    else snprintf(here, sizeof here, "HERE %d MIN", (int)(s / 60));
-    static const char *const STAGE_W[4] = { "FRY", "JUVENILE", "ADULT", "ELDER" };
-    struct { const char *lbl, *val; } FL[4] = { { "NAME", f->name }, { hlbl, home }, { "FORM", form }, { "STAGE", STAGE_W[f->stage & 3] } };
+    if (f->homeward) snprintf(here, sizeof here, "正在回家");
+    else if (s < 60) snprintf(here, sizeof here, "刚刚到访");
+    else snprintf(here, sizeof here, "已到访%d分钟", (int)(s / 60));
+    static const char *const STAGE_W[4] = { "鱼苗", "幼鱼", "成鱼", "老鱼" };
+    struct { const char *lbl, *val; } FL[4] = { { "名字", f->name }, { hlbl, home }, { "外形", form }, { "成长阶段", STAGE_W[f->stage & 3] } };
     for (int i = 0; i < 4; i++) {
         int fy = Y + 33 + i * 26;
         draw_text(c, FX, fy, 1, LBL, FL[i].lbl);
@@ -7315,14 +7484,14 @@ static void passport_card_draw(ctx_t *c, uint16_t *fb, int stride, const tank_t 
         if (i == 1 && vb >= 0) { link_badge_draw(c, FX + 6, fy + 17, 6, vb, 255); vx += 16; }
         draw_text(c, vx, fy + 10, 2, 0xffffff, FL[i].val);
     }
-    draw_text(c, PX, PY + PH + 12, 1, LBL, "VISITING");   /* (a gap under STAGE's value: HERE NN MIN reaches under it) */
+    draw_text(c, PX, PY + PH + 12, 1, LBL, "正在到访");   /* (a gap under STAGE's value: HERE NN MIN reaches under it) */
     draw_text(c, PX, PY + PH + 21, 2, 0xffffff, here);
     /* time together (2026-10-06): CLOSE TO <one of ours> and five pips that
        fill - filled vs hollow, never colour - no minutes (the goal is random) */
     { uint32_t mate = 0; float b = progression_bond(t, f->uid, &mate);
       const fish_t *m = NULL; for (int i = 0; i < t->n_fish && !m; i++) if (mate && t->fish[i].uid == mate) m = &t->fish[i];
       if (m && b > 0.02f) {
-          char cl[32]; snprintf(cl, sizeof cl, "INTERESTED IN %s", m->name);   /* (Strato 11-01: was CLOSE TO) */
+          char cl[32]; snprintf(cl, sizeof cl, "对%s感兴趣", m->name);   /* (Strato 11-01: was CLOSE TO) */
           int cy = PY + PH + 39;
           draw_text(c, PX, cy, 1, LBL, cl);
           int lit = (int)(b * 5 + 0.0001f);
@@ -7349,7 +7518,7 @@ static void passport_card_draw(ctx_t *c, uint16_t *fb, int stride, const tank_t 
             px_blend(c, (int)(sx + cosf(r) * 27), (int)(sy + sinf(r) * 27), GOLD, 120);
         }
         link_badge_draw(c, (int)sx, (int)sy - 5, 9, t->link_badge, 200);
-        draw_text(c, (int)sx - text_w("VISITED", 1) / 2, (int)sy + 9, 1, GOLD, "VISITED");
+        draw_text(c, (int)sx - text_w("曾到访", 1) / 2, (int)sy + 9, 1, GOLD, "曾到访");
     }
     /* the machine line */
     char m1[64], m2[64], nm[FISH_NAME_MAX + 1];
@@ -7367,18 +7536,18 @@ static void passport_card_draw(ctx_t *c, uint16_t *fb, int stride, const tank_t 
        once it is in the collection */
     bool have = collection_find(f->uid) >= 0, full = !have && collection_full();   /* full: every page (0.4 pages) - FULL, dim */
     if (have) {
-        const char *st = "COLLECTED";
+        const char *st = "已收藏";
         int sw = text_w(st, 2) + 12, sx0 = FX + 10, sy0 = Y + 152;   /* (clear of HERE N MIN and of the VISITED stamp) */
         rect_edge(c, sx0, sy0, sw, 24, GOLD); rect_edge(c, sx0 + 2, sy0 + 2, sw - 4, 20, GOLD);
         draw_text(c, sx0 + 6, sy0 + 5, 2, GOLD, st);
     }
     const int BY = Y + PASSPORT_BTN_Y, BW = PASSPORT_BTN_W, gap = W - 2 * BW - 24;
-    button(c, X + 12, BY, BW, PASSPORT_BTN_H, 0x1c2f36, 0x9fd8e2, "DEPORT", 2);
+    button(c, X + 12, BY, BW, PASSPORT_BTN_H, 0x1c2f36, 0x9fd8e2, "请它回家", 2);
     if (have || full) {
-        const char *w = have ? "COLLECTED" : "FULL";
+        const char *w = have ? "已收藏" : "已满";
         rect_edge(c, X + 12 + BW + gap, BY, BW, PASSPORT_BTN_H, 0x3f6a72);
         draw_text(c, X + 12 + BW + gap + (BW - text_w(w, 2)) / 2, BY + 8, 2, 0x3f6a72, w);
-    } else button(c, X + 12 + BW + gap, BY, BW, PASSPORT_BTN_H, 0x1c2f36, GOLD, "COLLECT", 2);
+    } else button(c, X + 12 + BW + gap, BY, BW, PASSPORT_BTN_H, 0x1c2f36, GOLD, "收藏", 2);
 }
 /* ---- THE CARDS BAKED (0.4, 11-02; Strato's rule: always look for frame-rate wins, never drop frames) ----
  * The GIVE modal and the gift card offered to us were drawn whole over the live tank every frame (+11-12 ms of render
@@ -7403,7 +7572,7 @@ static uint32_t bake_hash_s(uint32_t h, const char *s) { while (s && *s) h = bak
 static bool bake_stale(bake_t *b, uint32_t key, int h) { return !b->ok || b->key != key || b->h != h; }
 static uint32_t *bake_begin(bake_t *b, ctx_t *bc, int X, int Y, int W, int H, bool *hold) {
     uint32_t *tm = g_touched; g_touched = NULL; *hold = g_dirty_hold; g_dirty_hold = true;
-    ctx_t c = { b->buf, W, 1.0f, X, Y, W, H }; *bc = c;
+    ctx_t c = { b->buf, W, 1.0f, X, Y, W, H, NULL, 0, 0 }; *bc = c;
     return tm;
 }
 static void bake_end(bake_t *b, uint32_t key, int h, uint32_t *tm, bool hold) { g_touched = tm; g_dirty_hold = hold; b->key = key; b->h = h; b->ok = true; }
@@ -7424,7 +7593,7 @@ static void gift_paint(ctx_t *c, const tank_t *t) {
     const int W = GIFT_CARD_W, H = GIFT_CARD_H, X = (TANK_W - W) / 2, Y = (TANK_H - H) / 2;
     rect_fill(c, X, Y, W, H, 0x0e2233);
     rect_fill(c, X, Y, W, 26, INK);
-    const char *title = "A GIFT FOR YOUR TANK";
+    const char *title = "送给鱼缸的礼物";
     draw_text(c, X + (W - text_w(title, 2)) / 2, Y + 7, 2, GOLD, title);
     rect_edge(c, X, Y, W, H, GOLD); rect_edge(c, X + 1, Y + 1, W - 2, H - 2, INK);
     const int PX = X + 12, PY = Y + 36, PW = 100, PH = 84;
@@ -7432,10 +7601,10 @@ static void gift_paint(ctx_t *c, const tank_t *t) {
     const int FX = PX + PW + 12;
     char from[24], flbl[40], form[24];
     int b = g->ask.badge;
-    home_fields(pp->home_tank, pp->home_name, "FROM", flbl, sizeof flbl, from, sizeof from);
-    snprintf(form, sizeof form, "%s %s", SHAPE_NAMES[f.shape % SHAPE_N], FINS_NAMES[f.fins % FINS_N]);
-    static const char *const STAGE_W[4] = { "FRY", "JUVENILE", "ADULT", "ELDER" };
-    struct { const char *lbl, *val; } FL[4] = { { "NAME", f.name }, { flbl, from }, { "FORM", form }, { "STAGE", STAGE_W[pp->stage & 3] } };
+    home_fields(pp->home_tank, pp->home_name, "来自", flbl, sizeof flbl, from, sizeof from);
+    snprintf(form, sizeof form, "%s %s", ui_zh_label(SHAPE_NAMES[f.shape % SHAPE_N]), ui_zh_label(FINS_NAMES[f.fins % FINS_N]));
+    static const char *const STAGE_W[4] = { "鱼苗", "幼鱼", "成鱼", "老鱼" };
+    struct { const char *lbl, *val; } FL[4] = { { "名字", f.name }, { flbl, from }, { "外形", form }, { "成长阶段", STAGE_W[pp->stage & 3] } };
     for (int i = 0; i < 4; i++) {
         int fy = Y + 33 + i * 26;
         draw_text(c, FX, fy, 1, LBL, FL[i].lbl);
@@ -7443,13 +7612,13 @@ static void gift_paint(ctx_t *c, const tank_t *t) {
         if (i == 1 && b >= 0 && b < LINK_BADGES) { link_badge_draw(c, FX + 6, fy + 17, 6, b, 255); vx += 16; }   /* the shape AND the word */
         draw_text(c, vx, fy + 10, 2, 0xffffff, FL[i].val);
     }
-    const char *l1 = "IT WOULD LIVE HERE", *l2 = "FOR GOOD";
+    const char *l1 = "它将住在这里", *l2 = "成为永久居民";
     draw_text(c, X + (W - text_w(l1, 2)) / 2, Y + 140, 2, 0xffffff, l1);
     draw_text(c, X + (W - text_w(l2, 2)) / 2, Y + 160, 2, 0xffffff, l2);
     rect_edge(c, X + 24, Y + 186, W - 48, 6, 0x3f6a72);              /* the time left to answer (its fill: live) */
     const int BY = Y + GIFT_BTN_Y, gap = W - 2 * GIFT_BTN_W - 24;
-    button(c, X + 12, BY, GIFT_BTN_W, GIFT_BTN_H, 0x1c2f36, GOLD, "ACCEPT", 2);
-    button(c, X + 12 + GIFT_BTN_W + gap, BY, GIFT_BTN_W, GIFT_BTN_H, 0x1c2f36, 0x9fd8e2, "NO THANKS", 2);
+    button(c, X + 12, BY, GIFT_BTN_W, GIFT_BTN_H, 0x1c2f36, GOLD, "接受", 2);
+    button(c, X + 12 + GIFT_BTN_W + gap, BY, GIFT_BTN_W, GIFT_BTN_H, 0x1c2f36, 0x9fd8e2, "婉拒", 2);
 }
 /* where it may come up (the 11-02 sweep: it hid under every page - no card, no sound, NO ANSWER CAME after 60 s): OVER any
    page - the keeper page, settings, the shop, VISITORS, MY TANKS, the battery page, the LINK page - and it waits under the
@@ -7543,12 +7712,12 @@ static void shrimp_card_draw(ctx_t *c, const tank_t *t) {
             int ti = (int)(k - SHRIMP_KEYS);
             for (int yy = 0; yy < S; yy++) span(c, sx + x * S, sx + x * S + S - 1, sy + y * S + yy, &pal[ti], SHRIMP_ALPHA[ti]);
         }
-    char line[32];
-    snprintf(line, sizeof line, "%d SHRIMP", n);
+    char line[96];
+    snprintf(line, sizeof line, "%d只虾", n);
     draw_text(c, X + (W - text_w(line, 3)) / 2, Y + 46, 3, 0xffffff, line);
-    snprintf(line, sizeof line, "%d PELLET%s EATEN", (int)t->shrimp_eaten, t->shrimp_eaten == 1 ? "" : "S");
+    snprintf(line, sizeof line, "已吃掉%d粒饲料%s", (int)t->shrimp_eaten, t->shrimp_eaten == 1 ? "" : "");
     draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 76, 2, 0x9fd8e2, line);
-    const char *cap = "NEXT SHRIMP";
+    const char *cap = "下一只虾";
     draw_text(c, X + (W - text_w(cap, 2)) / 2, Y + 104, 2, 0x9fd8e2, cap);
     bool full = n >= SHRIMP_MAX;
     int have = full ? SHRIMP_PER_JOIN : t->shrimp_food;
@@ -7560,14 +7729,14 @@ static void shrimp_card_draw(ctx_t *c, const tank_t *t) {
             fill_ellipse(c, x - 2, py - 2, 2.2f, 2.2f, 0xffe9bd, 255);
         } else ring(c, x, py, 6, 0x5a6a6e);
     }
-    if (full) snprintf(line, sizeof line, "THE SCHOOL IS FULL");
-    else if (tank_shrimp_refusing(t)) snprintf(line, sizeof line, "TOO MUCH ALGAE TO EAT");
+    if (full) snprintf(line, sizeof line, "虾群已满");
+    else if (tank_shrimp_refusing(t)) snprintf(line, sizeof line, "藻类足够多");
     else if (t->shrimp_food >= SHRIMP_PER_JOIN && t->shrimp_cool > 0) {
         int m = (int)ceilf(t->shrimp_cool / 60.0f);
-        snprintf(line, sizeof line, "ARRIVES IN %d MIN", m < 1 ? 1 : m);
+        snprintf(line, sizeof line, "约%d分钟后加入", m < 1 ? 1 : m);
     } else {
         int more = SHRIMP_PER_JOIN - t->shrimp_food;
-        snprintf(line, sizeof line, "%d MORE PELLET%s", more, more == 1 ? "" : "S");
+        snprintf(line, sizeof line, "还需%d粒饲料%s", more, more == 1 ? "" : "");
     }
     draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 158, 2, 0xffffff, line);
 }
@@ -7592,25 +7761,25 @@ static void seahorse_card_draw(ctx_t *c, const tank_t *t) {
             for (int yy = 0; yy < S; yy++) span(c, ox + lx * S, ox + lx * S + S - 1, oy + ly * S + yy, &s, SH_ALPHA[b & 15]);
         }
     const int TX = X + 14 + SH_W * S + 12;   /* "+N.N TRUST PASSED ON" is 21 chars at scale 2: 252 px, inside the card from here */
-    draw_text(c, TX, Y + 18, 3, 0xffffff, "SEAHORSE");
-    char line[32];
+    draw_text(c, TX, Y + 18, 3, 0xffffff, "海马");
+    char line[96];
     float days = tank_seahorse_days(t);
-    if (days < 1) snprintf(line, sizeof line, "WITH YOU SINCE TODAY");
-    else snprintf(line, sizeof line, "%d DAY%s WITH YOU", (int)days, (int)days == 1 ? "" : "S");
+    if (days < 1) snprintf(line, sizeof line, "今天开始陪伴你");
+    else snprintf(line, sizeof line, "已陪伴你%d天%s", (int)days, (int)days == 1 ? "" : "");
     draw_text(c, TX, Y + 52, 2, 0x9fd8e2, line);
-    snprintf(line, sizeof line, "%d HITCH%s", (int)t->sh_hitches, t->sh_hitches == 1 ? "" : "ES");
+    snprintf(line, sizeof line, "已停靠%d次%s", (int)t->sh_hitches, t->sh_hitches == 1 ? "" : "");
     draw_text(c, TX, Y + 76, 2, 0xffffff, line);
-    snprintf(line, sizeof line, "+%d.%d TRUST PASSED ON", (int)t->sh_trust_passed, (int)(t->sh_trust_passed * 10) % 10);
+    snprintf(line, sizeof line, "传递信任+%d.%d", (int)t->sh_trust_passed, (int)(t->sh_trust_passed * 10) % 10);
     draw_text(c, TX, Y + 100, 2, 0xffffff, line);
-    snprintf(line, sizeof line, "%d PELLET%s SNAPPED", (int)t->sh_eaten, t->sh_eaten == 1 ? "" : "S");
+    snprintf(line, sizeof line, "已吃掉%d粒饲料%s", (int)t->sh_eaten, t->sh_eaten == 1 ? "" : "");
     draw_text(c, TX, Y + 124, 2, 0xffffff, line);
     char now[32];
-    if (t->sh_hitched) snprintf(now, sizeof now, "ON YOUR FINGER");
-    else if (t->sh_mode == SH_HITCH) snprintf(now, sizeof now, "SWIMMING TO YOU");
-    else if (t->night && t->sh_mode == SH_PERCH) snprintf(now, sizeof now, "ASLEEP");   /* only once it holds on (0.3.7: it said ASLEEP on the finger) */
-    else if (t->sh_mode == SH_PERCH && t->sh_akind == SH_ANCHOR_SAND) snprintf(now, sizeof now, "RESTING ON THE SAND");
-    else if (t->sh_mode == SH_PERCH) snprintf(now, sizeof now, "HOLDING %s", tank_seahorse_holding(t));
-    else snprintf(now, sizeof now, "ADRIFT");
+    if (t->sh_hitched) snprintf(now, sizeof now, "停在你的手指上");
+    else if (t->sh_mode == SH_HITCH) snprintf(now, sizeof now, "正在游向你");
+    else if (t->night && t->sh_mode == SH_PERCH) snprintf(now, sizeof now, "正在睡觉");   /* only once it holds on (0.3.7: it said ASLEEP on the finger) */
+    else if (t->sh_mode == SH_PERCH && t->sh_akind == SH_ANCHOR_SAND) snprintf(now, sizeof now, "在沙地上休息");
+    else if (t->sh_mode == SH_PERCH) snprintf(now, sizeof now, "抓住%s", ui_zh_label(tank_seahorse_holding(t)));
+    else snprintf(now, sizeof now, "随水漂游");
     draw_text(c, TX, Y + 156, 2, 0x9fd8e2, now);
 }
 
@@ -7717,7 +7886,7 @@ void render_stats_card(const tank_t *t, int fish_idx, uint16_t *fb, int stride) 
             for (int y = 0; y < RENDER_CARD_H; y++)
                 memcpy(g_card + y * RENDER_CARD_W,
                        scene + (RENDER_CARD_Y + y) * TANK_W + RENDER_CARD_X, RENDER_CARD_W * 2);
-            ctx_t cc = { g_card, RENDER_CARD_W, 1.0f, RENDER_CARD_X, RENDER_CARD_Y, RENDER_CARD_W, RENDER_CARD_H };
+            ctx_t cc = { g_card, RENDER_CARD_W, 1.0f, RENDER_CARD_X, RENDER_CARD_Y, RENDER_CARD_W, RENDER_CARD_H, NULL, 0, 0 };
             card_draw(cc, t, fish_idx);
             g_card_fish = fish_idx; g_card_epoch = ep; g_card_t = t->clock;
         }
@@ -7807,7 +7976,7 @@ static void give_box_draw(ctx_t *c, const tank_t *t, int fish) {
     shade_box(c, X, Y, W, H);
     if (look == GV_LEAVING) {                        /* the stamp, as on the keeper page */
         rect_edge(c, X, Y, W, H, GIVE_GOLD); rect_edge(c, X + 3, Y + 3, W - 6, H - 6, GIVE_GOLD);
-        draw_text(c, X + (W - text_w("GIVEN", 2)) / 2, Y + (H - 14) / 2, 2, GIVE_GOLD, "GIVEN");
+        draw_text(c, X + (W - text_w("已送出", 2)) / 2, Y + (H - 14) / 2, 2, GIVE_GOLD, "已送出");
         return;
     }
     give_button(c, X + 4, Y + 4, W - 8, H - 8, look, 2);
@@ -7834,7 +8003,7 @@ int render_tools_hit(float x, float y) {
 #define TOOL_CHIP_Y RENDER_CARD_Y
 #endif
 #define TOOL_CHIP_H 40
-static int tool_chip_w(void) { return 8 + 24 + 8 + text_w("DONE", 2) + 10; }
+static int tool_chip_w(void) { return 8 + 24 + 8 + text_w("完成", 2) + 10; }
 void render_tool_chip(const tank_t *t, int fish_idx, uint16_t *fb, int stride) {
     if (t->tool == TOOL_HAND || (fish_idx >= 0 && fish_idx < t->n_fish)) return;
     /* a stroke on the glass: the chip steps aside until the finger lifts, so
@@ -7847,7 +8016,7 @@ void render_tool_chip(const tank_t *t, int fish_idx, uint16_t *fb, int stride) {
     rect_edge(&c, X, Y, W, H, 0xffffff); rect_edge(&c, X + 1, Y + 1, W - 2, H - 2, 0x9fd8e2);
     const icon_t *ic = t->tool == TOOL_SCISSORS ? &icon_tool_scissors : &icon_tool_sponge;
     blit_icon(&c, X + 8, Y + (H - ic->h) / 2, ic, 255);
-    draw_text(&c, X + 8 + ic->w + 8, Y + (H - 14) / 2, 2, 0xffffff, "DONE");
+    draw_text(&c, X + 8 + ic->w + 8, Y + (H - 14) / 2, 2, 0xffffff, "完成");
 }
 bool render_tool_chip_hit(const tank_t *t, float x, float y) {
     return t->tool != TOOL_HAND && x < TOOL_CHIP_X + tool_chip_w() + 16 && y < TOOL_CHIP_Y + TOOL_CHIP_H + 24;
@@ -7916,17 +8085,74 @@ static const uint8_t *glyph(char ch) {
     const char *p = ch ? strchr(FONT_CHARS, ch) : NULL;
     return p ? FONT5X7[p - FONT_CHARS] : NULL;
 }
-static int text_w(const char *s, int scale) { int n = (int)strlen(s); return n ? n * 6 * scale - scale : 0; }
+#ifdef TANK_SZPI
+static void draw_text_native(ctx_t *c, int x, int y, int scale, uint32_t rgb, const char *text, bool uppercase) {
+    ctx_t native = ctx_native(c);
+    src_t colour = src_color(rgb, c->dim);
+    int target_size = scale == 1 ? 8 : 6 * scale;
+    int source_size = scale == 1 ? 8 : 12;
+    int top = (int)floorf((y + c->screen_offset_y) * (2.0f / 3)) - (target_size - 7 * scale * 2 / 3) / 2;
+    while (*text) {
+        uint32_t codepoint = ui_utf8_next(&text);
+        int advance = ui_text_advance(codepoint, scale);
+        if (uppercase && codepoint >= 'a' && codepoint <= 'z') codepoint -= 'a' - 'A';
+        const ui_zh_glyph_t *character = ui_zh_find(codepoint);
+        if (!character) character = ui_zh_find('?');
+        int left = (int)floorf((x + c->screen_offset_x) * (2.0f / 3));
+        for (int row = 0; row < target_size; row++) {
+            int source_y = row * source_size / target_size;
+            uint16_t bits = source_size == 8 ? character->small[source_y] : character->large[source_y];
+            for (int column = 0; column < target_size; column++) {
+                int source_x = column * source_size / target_size;
+                if (bits & (1u << (source_size - 1 - source_x))) {
+                    span(&native, left + column, left + column, top + row, &colour, 255);
+                }
+            }
+        }
+        x += advance;
+    }
+}
+#endif
+static int text_w(const char *s, int scale) { return ui_text_width(s, scale); }
 static void draw_text(ctx_t *c, int x, int y, int scale, uint32_t rgb, const char *s) {
+#ifdef TANK_SZPI
+    draw_text_native(c, x, y, scale, rgb, s, true);
+    return;
+#endif
     src_t col = src_color(rgb, c->dim);
-    for (; *s; s++, x += 6 * scale) {
-        const uint8_t *g = glyph(*s);
-        if (!g) continue;
-        for (int r = 0; r < 7; r++)
-            for (int k = 0; k < 5; k++)
-                if (g[r] & (0x10 >> k))
-                    for (int yy = 0; yy < scale; yy++)
-                        span(c, x + k * scale, x + k * scale + scale - 1, y + r * scale + yy, &col, 255);
+    while (*s) {
+        uint32_t codepoint = ui_utf8_next(&s);
+        int advance = ui_text_advance(codepoint, scale);
+        if (codepoint >= 0x80) {
+            const ui_zh_glyph_t *chinese = ui_zh_find(codepoint);
+            if (chinese) {
+                int size = scale == 1 ? 8 : 12;
+                int height = scale == 1 ? 12 : 9 * scale;
+                int top = y - (height - 7 * scale) / 2;
+                for (int row = 0; row < height; row++) {
+                    int source_y = row * size / height;
+                    uint16_t bits = size == 8 ? chinese->small[source_y] : chinese->large[source_y];
+                    for (int column = 0; column < height; column++) {
+                        int source_x = column * size / height;
+                        if (bits & (1u << (size - 1 - source_x))) {
+                            span(c, x + column, x + column, top + row, &col, 255);
+                        }
+                    }
+                }
+                x += advance;
+                continue;
+            }
+            codepoint = '?';
+        }
+        const uint8_t *g = glyph((char)codepoint);
+        if (g) {
+            for (int r = 0; r < 7; r++)
+                for (int k = 0; k < 5; k++)
+                    if (g[r] & (0x10 >> k))
+                        for (int yy = 0; yy < scale; yy++)
+                            span(c, x + k * scale, x + k * scale + scale - 1, y + r * scale + yy, &col, 255);
+        }
+        x += advance;
     }
 }
 
@@ -7936,6 +8162,13 @@ static void draw_text(ctx_t *c, int x, int y, int scale, uint32_t rgb, const cha
  * only lengthens strokes and never thickens a bar - Strato wanted the line
  * smaller than the page's text (14 px) but not the font's 7 px. */
 static void draw_text_8px(ctx_t *c, int x, int y, uint32_t rgb, const char *s) {
+#ifdef TANK_SZPI
+    draw_text_native(c, x, y, 1, rgb, s, true);
+    return;
+#endif
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p >= 0x80) { draw_text(c, x, y, 1, rgb, s); return; }
+    }
     src_t col = src_color(rgb, c->dim);
     for (; *s; s++, x += 6) {
         const uint8_t *g = glyph(*s);
@@ -7972,6 +8205,11 @@ int  render_text_w(const char *s, int scale) { return text_w(s, scale); }
 void render_text(uint16_t *fb, int stride, int x, int y, int scale, uint32_t rgb, const char *s) {
     ctx_t c = ctx_page(fb, stride); draw_text(&c, x, y, scale, rgb, s);
 }
+#ifdef TANK_SZPI
+void render_text_case(uint16_t *fb, int stride, int x, int y, int scale, uint32_t rgb, const char *s) {
+    ctx_t c = ctx_page(fb, stride); draw_text_native(&c, x, y, scale, rgb, s, false);
+}
+#endif
 void render_rect(uint16_t *fb, int stride, int x, int y, int w, int h, uint32_t rgb) {
     ctx_t c = ctx_page(fb, stride); rect_fill(&c, x, y, w, h, rgb);
 }
@@ -8042,14 +8280,14 @@ void render_confirm_reset(uint16_t *fb, int stride, float frac) {
     const int X = RENDER_CONFIRM_X, Y = RENDER_CONFIRM_Y, W = RENDER_CONFIRM_W, H = RENDER_CONFIRM_H;
     rect_fill(&c, X, Y, W, H, 0x04141a);
     rect_edge(&c, X, Y, W, H, 0x9fd8e2); rect_edge(&c, X + 1, Y + 1, W - 2, H - 2, 0x1c2f36);
-    const char *title = "RESET TANK?";
+    const char *title = "重置鱼缸？";
     draw_text(&c, X + (W - text_w(title, 3)) / 2, Y + 20, 3, 0xffffff, title);
-    const char *l1 = "START OVER WITH TWO FRY", *l2 = "EVERYTHING ELSE IS LOST";
+    const char *l1 = "从两条鱼苗重新开始", *l2 = "其余进度将被清除";
     draw_text(&c, X + (W - text_w(l1, 2)) / 2, Y + 58, 2, 0x9fd8e2, l1);
     draw_text(&c, X + (W - text_w(l2, 2)) / 2, Y + 78, 2, 0x9fd8e2, l2);
     /* NO is the calm one; YES wears the stress red */
-    button(&c, RENDER_CONFIRM_NO_X,  RENDER_CONFIRM_BTN_Y, RENDER_CONFIRM_BTN_W, RENDER_CONFIRM_BTN_H, 0x1c2f36, 0x9fd8e2, "NO", 3);
-    button(&c, RENDER_CONFIRM_YES_X, RENDER_CONFIRM_BTN_Y, RENDER_CONFIRM_BTN_W, RENDER_CONFIRM_BTN_H, 0x7a2028, 0xf25b65, "YES", 3);
+    button(&c, RENDER_CONFIRM_NO_X,  RENDER_CONFIRM_BTN_Y, RENDER_CONFIRM_BTN_W, RENDER_CONFIRM_BTN_H, 0x1c2f36, 0x9fd8e2, "否", 3);
+    button(&c, RENDER_CONFIRM_YES_X, RENDER_CONFIRM_BTN_Y, RENDER_CONFIRM_BTN_W, RENDER_CONFIRM_BTN_H, 0x7a2028, 0xf25b65, "是", 3);
     /* the prompt lets itself go: a bar draining toward the timeout */
     if (frac < 0) frac = 0;
     if (frac > 1) frac = 1;
@@ -8076,19 +8314,19 @@ int render_confirm_hit(float x, float y) {
 void render_battery_info(uint16_t *fb, int stride, const bat_info_t *bi, double clock) {
     ctx_t c = ctx_full(fb, stride, 1.0f);
     bool pw = BAT_ON_POWER(bi->state);
-    char lab[3][16], val[3][32], d[16]; int nr = 0;
+    char lab[3][16], val[3][48], d[32]; int nr = 0;
     if (bi->since_min >= 0) {
-        snprintf(lab[nr], sizeof lab[nr], pw ? "PLUGGED IN" : "UNPLUGGED");
-        if (bi->since_min < 1) snprintf(val[nr], sizeof val[nr], "JUST NOW");
-        else { battery_fmt_dur(d, sizeof d, bi->since_min); snprintf(val[nr], sizeof val[nr], "%s AGO", d); }
+        snprintf(lab[nr], sizeof lab[nr], pw ? "已接通电源" : "已拔出电源");
+        if (bi->since_min < 1) snprintf(val[nr], sizeof val[nr], "刚刚");
+        else { battery_fmt_dur(d, sizeof d, bi->since_min); snprintf(val[nr], sizeof val[nr], "%s前", d); }
         nr++;
     }
     if (!pw && bi->awake_min >= 0) {
-        snprintf(lab[nr], sizeof lab[nr], "SCREEN ON");
+        snprintf(lab[nr], sizeof lab[nr], "亮屏时长");
         battery_fmt_dur(val[nr], sizeof val[nr], bi->awake_min); nr++;
     }
     if (bi->life_min > 0) {
-        snprintf(lab[nr], sizeof lab[nr], "BATTERY LIFE");
+        snprintf(lab[nr], sizeof lab[nr], "电池续航");
         battery_fmt_dur(d, sizeof d, bi->life_min); snprintf(val[nr], sizeof val[nr], "~%s", d); nr++;
     }
     const int W = 336, H = (bi->mv > 0 ? 170 : 154) + nr * 26, X = (TANK_W - W) / 2, Y = (TANK_H - H) / 2;
@@ -8103,15 +8341,15 @@ void render_battery_info(uint16_t *fb, int stride, const bat_info_t *bi, double 
     draw_battery(&c, gx + bolt, gy, BW, BH, 2, bi->pct / 100.0f, bi->state, clock);
     draw_text(&c, gx + bolt + BW + 6 + 20, gy + (BH - 7 * TS) / 2, TS, 0xffffff, pct);
     /* the state, then what it means in time */
-    const char *st = bi->state == BAT_CHARGING ? "CHARGING" : bi->state == BAT_FULL ? "FULLY CHARGED"
-                   : bi->state == BAT_PLUGGED ? "PLUGGED IN" : "ON BATTERY";
+    const char *st = bi->state == BAT_CHARGING ? "正在充电" : bi->state == BAT_FULL ? "电量已充满"
+                   : bi->state == BAT_PLUGGED ? "已接通电源" : "电池供电";
     draw_text(&c, X + (W - text_w(st, 3)) / 2, Y + 78, 3, 0xffffff, st);
     char est[48];
-    if (bi->state == BAT_CHARGING) { battery_fmt_dur(d, sizeof d, bi->left_min); snprintf(est, sizeof est, "FULL IN ABOUT %s", d); }
-    else if (bi->state == BAT_FULL) snprintf(est, sizeof est, "READY TO UNPLUG");
-    else if (bi->state == BAT_PLUGGED) snprintf(est, sizeof est, "NOT CHARGING RIGHT NOW");
-    else if (bi->left_min < 5) snprintf(est, sizeof est, "ALMOST EMPTY");
-    else { battery_fmt_dur(d, sizeof d, bi->left_min); snprintf(est, sizeof est, "ABOUT %s LEFT", d); }
+    if (bi->state == BAT_CHARGING) { battery_fmt_dur(d, sizeof d, bi->left_min); snprintf(est, sizeof est, "预计%s后充满", d); }
+    else if (bi->state == BAT_FULL) snprintf(est, sizeof est, "可以拔出电源");
+    else if (bi->state == BAT_PLUGGED) snprintf(est, sizeof est, "当前未充电");
+    else if (bi->left_min < 5) snprintf(est, sizeof est, "电量即将耗尽");
+    else { battery_fmt_dur(d, sizeof d, bi->left_min); snprintf(est, sizeof est, "预计还可用%s", d); }
     draw_text(&c, X + (W - text_w(est, 2)) / 2, Y + 110, 2, 0x9fd8e2, est);
     rect_fill(&c, X + 20, Y + 138, W - 40, 1, 0x1c2f36);
     for (int i = 0; i < nr; i++) {
@@ -8200,12 +8438,12 @@ static int tank_pages(const tank_t *t) { return (tank_badge_n(t) + MSP_TANK_PER_
 static uint32_t g_ms_tshown;
 uint32_t render_milestones_tank_shown(void) { return g_ms_tshown; }
 uint32_t render_tank_badge_bits(void) { uint32_t b = 0; for (int k = 0; k < TANK_BADGE_N; k++) b |= TANK_BADGES[k].bit; return b; }
-static const char *const STAGE_WORDS[4] = { "FRY", "JUVENILE", "ADULT", "ELDER" };
+static const char *const STAGE_WORDS[4] = { "鱼苗", "幼鱼", "成鱼", "老鱼" };
 /* the detail modal (a tap on a badge / name / strip): what to show until
  * the next tap. caption[0] == 0 means no modal. */
-static char g_ms_caption[72], g_ms_title[16];
-static char g_ms_caption2[32];       /* the caption's second line (the fry checklist's sentences), or empty */
-static char g_ms_sub[32];            /* a line under the caption (the fry checklist's progress), or empty */
+static char g_ms_caption[72], g_ms_title[32];
+static char g_ms_caption2[64];       /* UTF-8 second line of the fry checklist. */
+static char g_ms_sub[64];            /* UTF-8 progress line. */
 static bool g_ms_lit;
 static const icon_t *g_ms_icon;      /* the badge's art, or NULL */
 static int  g_ms_fish = -1;          /* a fish's own sprite instead, or -1 */
@@ -8260,21 +8498,21 @@ static bool give_line(const tank_t *t, int fish, char *out, size_t n) {
     if (!g || fish < 0 || fish >= t->n_fish) return false;
     int look = give_look(t, fish);
     char who[20];                                   /* "THE TRIANGLE TANK" / "THE TANK NEXT DOOR": 18 at most (GIVEN TO + it fits the line's 32) */
-    if (g->peer_badge >= 0 && g->peer_badge < LINK_BADGES) snprintf(who, sizeof who, "THE %s TANK", BADGE_WORDS[g->peer_badge]);
-    else snprintf(who, sizeof who, "THE TANK NEXT DOOR");
-    if (look == GV_LEAVING) { snprintf(out, n, "GIVEN TO %s", who); return true; }
-    if (look == GV_ASKING)  { snprintf(out, n, "ASKING %s", who); return true; }
+    if (g->peer_badge >= 0 && g->peer_badge < LINK_BADGES) snprintf(who, sizeof who, "%s鱼缸", BADGE_WORDS[g->peer_badge]);
+    else snprintf(who, sizeof who, "邻居的鱼缸");
+    if (look == GV_LEAVING) { snprintf(out, n, "已送给%s", who); return true; }
+    if (look == GV_ASKING)  { snprintf(out, n, "正在询问%s", who); return true; }
     if (g->said_uid == t->fish[fish].uid && t->clock < g->said_until) {
-        static const char *const SAID[] = { "THEY SAID NO THANKS", "THEIR TANK IS FULL", "NO ANSWER CAME", "", "CANNOT BE GIVEN RIGHT NOW" };
+        static const char *const SAID[] = { "对方婉拒了", "对方鱼缸已满", "尚未收到答复", "", "暂时无法送出" };
         snprintf(out, n, "%s", SAID[g->said_reason <= LINK_GIVE_NO_OTHER ? g->said_reason : LINK_GIVE_NO_OTHER]);
         return out[0] != 0;
     }
     return false;
 }
 static void give_button(ctx_t *c, int x, int y, int w, int h, int look, int scale) {
-    if (look == GV_GIVE)   { button(c, x, y, w, h, 0x1c2f36, GIVE_GOLD, "GIVE", scale); return; }
-    if (look == GV_ASKING) { button(c, x, y, w, h, 0x155e58, GIVE_GOLD, "ASKING", scale); return; }
-    const char *s = look == GV_LEAVING ? "GIVEN" : "GIVE";                /* dim: not now (or on its way) */
+    if (look == GV_GIVE)   { button(c, x, y, w, h, 0x1c2f36, GIVE_GOLD, "赠送", scale); return; }
+    if (look == GV_ASKING) { button(c, x, y, w, h, 0x155e58, GIVE_GOLD, "正在询问", scale); return; }
+    const char *s = look == GV_LEAVING ? "已送出" : "赠送";                /* dim: not now (or on its way) */
     rect_fill(c, x, y, w, h, 0x04141a); rect_edge(c, x, y, w, h, MSP_DIM);
     draw_text(c, x + (w - text_w(s, scale)) / 2, y + (h - 7 * scale) / 2, scale, MSP_DIM, s);
 }
@@ -8307,7 +8545,7 @@ _Static_assert(GM_W * GM_H <= GIFT_CARD_W * GIFT_CARD_H && GM_PICK_H <= GM_H, "t
 static struct {
     bool on; uint32_t uid; double opened, step_t, asked; int step;
     bool pick; int8_t edge; uint32_t peer[LINK_EDGES]; int8_t badge[LINK_EDGES];   /* latched as it opens: the door and tank, or the two */
-    char line[32];                                                                  /* GM_SAID / GM_WHY: the words, until OK */
+    char line[96];                                                                  /* GM_SAID / GM_WHY: the words, until OK */
     bool by_tap;                                                                    /* the step a tap brought up (W applies; touch_gate.h) */
     unsigned drawn_frame;                                                           /* the frame it was last drawn in (0: not yet) */
 } g_gm;
@@ -8317,8 +8555,8 @@ static int gm_fish(const tank_t *t) {
 }
 static void gm_say(const tank_t *t, const char *why) { snprintf(g_gm.line, sizeof g_gm.line, "%s", why); g_gm.step = RENDER_GM_SAID; g_gm.step_t = t->clock; g_gm.by_tap = false; }
 static const char *gm_why(const tank_t *t, int fish) {   /* keep-two as the GIVE counts it: fish of ours on their way out are gone (803f1d2) */
-    return t->fish[fish].born_away ? "VISITING NEXT DOOR"   /* (a fry of ours not yet home: its welcome first - R-seam F4) */
-         : !progression_keeps_two(t, fish) ? "KEEP AT LEAST TWO FISH" : "NAME THE NEW FRY FIRST"; }
+    return t->fish[fish].born_away ? "正在邻居家做客"   /* (a fry of ours not yet home: its welcome first - R-seam F4) */
+         : !progression_keeps_two(t, fish) ? "至少保留两条鱼" : "请先给新鱼苗取名"; }
 static bool gm_row_open(const tank_t *t, const gift_book_t *g, int e) { return t->door_open[e] && g->door_peer[e] && g->door_peer[e] == g_gm.peer[e]; }
 static void gm_open(const tank_t *t, int fish) {
     const gift_book_t *g = gift_of(t);
@@ -8339,7 +8577,7 @@ static void gm_open(const tank_t *t, int fish) {
         return;
     }
     if (e == -2) { g_gm.pick = true; g_gm.step = RENDER_GM_PICK; return; }
-    if (e < 0 || e >= LINK_EDGES || !g_gm.peer[e]) { gm_say(t, "CANNOT BE GIVEN RIGHT NOW"); g_gm.by_tap = true; return; }   /* (a tap opened it: W on its OK) */
+    if (e < 0 || e >= LINK_EDGES || !g_gm.peer[e]) { gm_say(t, "暂时无法送出"); g_gm.by_tap = true; return; }   /* (a tap opened it: W on its OK) */
     g_gm.edge = (int8_t)e; g_gm.step = RENDER_GM_CONFIRM;
 }
 /* where the modal is now - the book and the doors move it on (and may close it) */
@@ -8350,10 +8588,10 @@ static int gm_eval(const tank_t *t) {
     if (step == RENDER_GM_SAID || step == RENDER_GM_WHY) return step;          /* (until OK) */
     int i = gm_fish(t);
     if (g && g->leaving_uid == g_gm.uid) { g_gm.on = false; return RENDER_GM_OFF; }   /* accepted: the card's GIVEN stamp takes it from here */
-    if (!g || i < 0) { gm_say(t, "CANNOT BE GIVEN RIGHT NOW"); return g_gm.step; }
+    if (!g || i < 0) { gm_say(t, "暂时无法送出"); return g_gm.step; }
     if (g->asking_uid == g_gm.uid || g->wait_uid == g_gm.uid || g->want_uid == g_gm.uid) step = RENDER_GM_ASKING;
     else if (g->said_uid == g_gm.uid && g->said_until - GIFT_SAID_S >= g_gm.asked) {   /* this gift's NO */
-        static const char *const SAID[] = { "THEY SAID NO THANKS", "THEIR TANK IS FULL", "NO ANSWER CAME", "", "CANNOT BE GIVEN RIGHT NOW" };
+        static const char *const SAID[] = { "对方婉拒了", "对方鱼缸已满", "尚未收到答复", "", "暂时无法送出" };
         gm_say(t, SAID[g->said_reason <= LINK_GIVE_NO_OTHER ? g->said_reason : LINK_GIVE_NO_OTHER]);
         if (!g_gm.line[0]) g_gm.on = false;                                     /* (called off: nothing to say) */
         return g_gm.on ? g_gm.step : RENDER_GM_OFF;
@@ -8361,8 +8599,8 @@ static int gm_eval(const tank_t *t) {
     else if (step == RENDER_GM_ASKING) { g_gm.on = false; return RENDER_GM_OFF; }   /* (taken back without a word) */
     else if (!progression_fish_givable(t, i)) { snprintf(g_gm.line, sizeof g_gm.line, "%s", gm_why(t, i)); step = RENDER_GM_WHY; }
     else if (g_gm.pick) {
-        if (!gm_row_open(t, g, LINK_LEFT) && !gm_row_open(t, g, LINK_RIGHT)) { gm_say(t, "CANNOT BE GIVEN RIGHT NOW"); return g_gm.step; }
-    } else if (g_gm.edge < 0 || !gm_row_open(t, g, g_gm.edge)) { gm_say(t, "CANNOT BE GIVEN RIGHT NOW"); return g_gm.step; }
+        if (!gm_row_open(t, g, LINK_LEFT) && !gm_row_open(t, g, LINK_RIGHT)) { gm_say(t, "暂时无法送出"); return g_gm.step; }
+    } else if (g_gm.edge < 0 || !gm_row_open(t, g, g_gm.edge)) { gm_say(t, "暂时无法送出"); return g_gm.step; }
     if (step != g_gm.step) { g_gm.step = step; g_gm.step_t = t->clock; g_gm.by_tap = false; }   /* (an event moved it: G1 only) */
     return step;
 }
@@ -8376,10 +8614,13 @@ static void gm_arrow(ctx_t *c, int cx, int cy, int half, int dir, uint32_t rgb) 
     for (int i = 0; i <= half; i++) { int hh = half - i; rect_fill(c, cx + (dir > 0 ? -half / 2 + i : half / 2 - i), cy - hh, 1, 2 * hh + 1, rgb); }
 }
 static void gm_split(const char *s, char *a, char *b, int n) {   /* two lines at the space nearest the middle */
-    int len = (int)strlen(s), best = -1;
-    for (int i = 0; i < len; i++) if (s[i] == ' ' && (best < 0 || abs(i - len / 2) < abs(best - len / 2))) best = i;
-    if (best < 0) { snprintf(a, n, "%s", s); b[0] = 0; return; }
-    snprintf(a, n, "%.*s", best, s); snprintf(b, n, "%s", s + best + 1);
+    size_t cut = ui_text_fit_bytes(s, GM_W - 24, 2, (size_t)n - 1);
+    size_t space = cut;
+    while (space && s[space] != ' ') space--;
+    if (space) cut = space;
+    memcpy(a, s, cut); a[cut] = 0;
+    s += cut; while (*s == ' ') s++;
+    ui_text_copy(b, (size_t)n, s);
 }
 static int gm_card_h(void) { return g_gm.step == RENDER_GM_PICK ? GM_PICK_H : GM_H; }
 static void gm_frame(int *X, int *Y) { *X = (TANK_W - GM_W) / 2; *Y = (TANK_H - gm_card_h()) / 2; }
@@ -8392,7 +8633,7 @@ static void gm_paint(ctx_t *c, const tank_t *t, int step) {
     const int W = GM_W, H = gm_card_h(); int X, Y; gm_frame(&X, &Y);
     rect_fill(c, X, Y, W, H, 0x0e2233);
     rect_fill(c, X, Y, W, 26, INK);
-    char title[40]; snprintf(title, sizeof title, step == RENDER_GM_PICK ? "GIVE %s TO" : "GIVE %s?", nm);
+    char title[40]; snprintf(title, sizeof title, step == RENDER_GM_PICK ? "将%s送给" : "送出%s？", nm);
     draw_text(c, X + (W - text_w(title, 2)) / 2, Y + 7, 2, GOLD, title);
     rect_edge(c, X, Y, W, H, GOLD); rect_edge(c, X + 1, Y + 1, W - 2, H - 2, INK);
     if (step == RENDER_GM_PICK) {
@@ -8404,42 +8645,42 @@ static void gm_paint(ctx_t *c, const tank_t *t, int step) {
             rect_edge(c, RX, RY, RW, RH, edge); rect_edge(c, RX + 1, RY + 1, RW - 2, RH - 2, edge);
             gm_arrow(c, s ? RX + RW - 18 : RX + 18, RY + RH / 2, 11, s ? 1 : -1, off ? DIM : 0xffffff);
             char lbl[40], val[24];
-            home_fields(g_gm.peer[s], gm_tank_name(t, g_gm.peer[s]), "HOME", lbl, sizeof lbl, val, sizeof val);
+            home_fields(g_gm.peer[s], gm_tank_name(t, g_gm.peer[s]), "家园", lbl, sizeof lbl, val, sizeof val);
             int tx = s ? RX + 16 : RX + 40, vx = tx, b = g_gm.badge[s];
-            draw_text(c, tx, RY + 10, 1, off ? 0xc8d6de : LBL, off ? "NOT LINKED NOW" : lbl);   /* (closed while up: which one, dim, no tap) */
+            draw_text(c, tx, RY + 10, 1, off ? 0xc8d6de : LBL, off ? "当前未连接" : lbl);   /* (closed while up: which one, dim, no tap) */
             if (b >= 0 && b < LINK_BADGES) { link_badge_draw(c, tx + 7, RY + 33, 7, b, off ? 90 : 255); vx += 24; }   /* the shape AND the name */
             draw_text(c, vx, RY + 26, 2, off ? DIM : 0xffffff, val);
         }
-        button(c, X + (W - GM_BTN_W) / 2, Y + H - GM_BTN_H - 12, GM_BTN_W, GM_BTN_H, 0x1c2f36, 0x9fd8e2, "BACK", 2);
+        button(c, X + (W - GM_BTN_W) / 2, Y + H - GM_BTN_H - 12, GM_BTN_W, GM_BTN_H, 0x1c2f36, 0x9fd8e2, "返回", 2);
         return;
     }
     const int PX = X + 12, PY = Y + 36, PW = 100, PH = 84;
     rect_fill(c, PX, PY, PW, PH, 0x0a1824); rect_edge(c, PX, PY, PW, PH, 0x9fd8e2);
     const int FX = PX + PW + 12;
-    draw_text(c, FX, Y + 36, 1, LBL, "NAME");
+    draw_text(c, FX, Y + 36, 1, LBL, "名字");
     draw_text(c, FX, Y + 46, 2, 0xffffff, nm);
     if (g_gm.edge >= 0 && g_gm.peer[g_gm.edge]) {     /* TO: the tank and its door */
         int e = g_gm.edge; char lbl[40], val[24];
-        home_fields(g_gm.peer[e], gm_tank_name(t, g_gm.peer[e]), "TO", lbl, sizeof lbl, val, sizeof val);
+        home_fields(g_gm.peer[e], gm_tank_name(t, g_gm.peer[e]), "赠予", lbl, sizeof lbl, val, sizeof val);
         draw_text(c, FX, Y + 72, 1, LBL, lbl);
         int vx = FX, b = g_gm.badge[e];
         if (b >= 0 && b < LINK_BADGES) { link_badge_draw(c, FX + 6, Y + 89, 6, b, 255); vx += 18; }
         draw_text(c, vx, Y + 82, 2, 0xffffff, val);
         gm_arrow(c, vx + text_w(val, 2) + 14, Y + 89, 7, e == LINK_RIGHT ? 1 : -1, 0xffffff);
     }
-    char a[32], b[32];
-    if (step == RENDER_GM_CONFIRM) { snprintf(a, sizeof a, "IT WOULD LIVE THERE"); snprintf(b, sizeof b, "FOR GOOD"); }
-    else if (step == RENDER_GM_ASKING) { snprintf(a, sizeof a, "ASKING THEIR KEEPER"); b[0] = 0; }
-    else if (text_w(g_gm.line, 2) <= W - 24) { snprintf(a, sizeof a, "%s", g_gm.line); b[0] = 0; }
+    char a[96], b[96];
+    if (step == RENDER_GM_CONFIRM) { snprintf(a, sizeof a, "它将永久住在对方家中"); snprintf(b, sizeof b, "成为永久居民"); }
+    else if (step == RENDER_GM_ASKING) { snprintf(a, sizeof a, "正在询问对方主人"); b[0] = 0; }
+    else if (text_w(g_gm.line, 2) <= W - 24) { ui_text_copy(a, sizeof a, g_gm.line); b[0] = 0; }
     else gm_split(g_gm.line, a, b, sizeof a);
     draw_text(c, X + (W - text_w(a, 2)) / 2, Y + 136, 2, 0xffffff, a);
     if (b[0]) draw_text(c, X + (W - text_w(b, 2)) / 2, Y + 156, 2, 0xffffff, b);
     if (step == RENDER_GM_ASKING) rect_edge(c, X + 24, Y + 162, W - 48, 6, DIM);   /* the other keeper's time (its fill: live) */
     const int BY = Y + H - GM_BTN_H - 12, gap = W - 2 * GM_BTN_W - 24;
     if (step == RENDER_GM_CONFIRM) {
-        button(c, X + 12, BY, GM_BTN_W, GM_BTN_H, 0x1c2f36, GOLD, "GIVE", 2);
-        button(c, X + 12 + GM_BTN_W + gap, BY, GM_BTN_W, GM_BTN_H, 0x1c2f36, 0x9fd8e2, "BACK", 2);
-    } else button(c, X + (W - GM_BTN_W) / 2, BY, GM_BTN_W, GM_BTN_H, 0x1c2f36, 0x9fd8e2, step == RENDER_GM_ASKING ? "CALL OFF" : "OK", 2);
+        button(c, X + 12, BY, GM_BTN_W, GM_BTN_H, 0x1c2f36, GOLD, "赠送", 2);
+        button(c, X + 12 + GM_BTN_W + gap, BY, GM_BTN_W, GM_BTN_H, 0x1c2f36, 0x9fd8e2, "返回", 2);
+    } else button(c, X + (W - GM_BTN_W) / 2, BY, GM_BTN_W, GM_BTN_H, 0x1c2f36, 0x9fd8e2, step == RENDER_GM_ASKING ? "取消请求" : "确定", 2);
 }
 /* what the still card shows (a new key: painted again) */
 static uint32_t gm_key(const tank_t *t, int step) {
@@ -8486,7 +8727,7 @@ int  render_give_modal_step(const tank_t *t) { return gm_eval(t); }
 void render_give_modal_close(void) { g_gm.on = false; }   /* (the director's `link modal off`: as BACK) */
 const char *render_give_modal_line(const tank_t *t) {
     int step = gm_eval(t);
-    return step == RENDER_GM_CONFIRM ? "IT WOULD LIVE THERE" : step == RENDER_GM_ASKING ? "ASKING THEIR KEEPER" : step == RENDER_GM_PICK ? "" : g_gm.line;
+    return step == RENDER_GM_CONFIRM ? "它将永久住在对方家中" : step == RENDER_GM_ASKING ? "正在询问对方主人" : step == RENDER_GM_PICK ? "" : g_gm.line;
 }
 void render_give_modal(const tank_t *t, uint16_t *fb, int stride) { if (!g_ms_in) gm_draw(t, fb, stride); }   /* (the keeper page draws its own) */
 bool render_give_modal_button(const tank_t *t, int which, int *x, int *y) {
@@ -8657,7 +8898,7 @@ static int ms_open(const tank_t *t, int row, bool tank_row, bool fry_row, int k,
 static void ms_close(void);
 /* a fish card's second line (0.4): its form - what it is, or will grow into */
 static void ms_genes_line(const fish_t *f) {
-    snprintf(g_ms_caption2, sizeof g_ms_caption2, "%s  %s  %s", SHAPE_NAMES[f->shape % SHAPE_N], FINS_NAMES[f->fins % FINS_N], PATTERN_NAMES[f->pattern % PATTERN_N]);
+    snprintf(g_ms_caption2, sizeof g_ms_caption2, "%s  %s  %s", ui_zh_label(SHAPE_NAMES[f->shape % SHAPE_N]), ui_zh_label(FINS_NAMES[f->fins % FINS_N]), ui_zh_label(PATTERN_NAMES[f->pattern % PATTERN_N]));
 }
 /* the modal's box: a gate's and a fish's card are taller (a button row at the
    foot) and stand higher, clear of the CLOSE button */
@@ -8770,7 +9011,7 @@ static void ms_fry_label(ctx_t *c, int top, const ms_box_t *clip) {
         if (x0 > x1 || y0 > y1) return;
         cw.fb = &CTX_PX(c, x0, y0); cw.ox = x0; cw.oy = y0; cw.w = x1 - x0 + 1; cw.h = y1 - y0 + 1;
     }
-    draw_text(&cw, 92, top + 2, 2, MSP_TEAL, "NEW FRY");
+    draw_text(&cw, 92, top + 2, 2, MSP_TEAL, "新鱼苗");
 }
 /* the moving things, in the page's order: each fish's portrait, the NEW FRY row's fry, the GROW gate's fish. Draws
    thing k (false: there is no thing k) and gives its zone (where nothing still is drawn) */
@@ -8932,7 +9173,7 @@ void render_milestones(const tank_t *t, uint16_t *fb, int stride) {
     }
     /* the tank's row (its sand dollar and balance went to the foot's UPGRADES, 0.4) */
     for (int x = 24; x < PAGE_W - 24; x++) px_blend(&c, x, MSP_TANK_Y - 4, MSP_DIM, 200);
-    draw_text(&c, MSP_TNAME_X, MSP_TANK_Y + 2, 2, MSP_TEAL, "TANK");
+    draw_text(&c, MSP_TNAME_X, MSP_TANK_Y + 2, 2, MSP_TEAL, "鱼缸");
     for (int k = 0; k < POP_CAP; k++)        /* population strip: who is here, who could still arrive */
         fish_glyph(&c, MSP_TNAME_X + 4 + k * 14, MSP_TANK_Y + 30, 2.8f, k < t->n_fish ? MSP_TEAL : MSP_DIM);
     int nb = tank_badge_n(t), np = tank_pages(t);
@@ -8981,7 +9222,7 @@ void render_milestones(const tank_t *t, uint16_t *fb, int stride) {
         const int H = 56 + n * 20 + 16;
         rect_fill(&c, X, Y, W, H, 0x04141a);
         rect_edge(&c, X, Y, W, H, MSP_TEAL); rect_edge(&c, X + 1, Y + 1, W - 2, H - 2, 0x1c2f36);
-        char title[24]; snprintf(title, sizeof title, "%s: HOW", g_ms_title);
+        char title[96]; snprintf(title, sizeof title, "%s：怎么做", g_ms_title);
         draw_text(&c, X + (W - text_w(title, 3)) / 2, Y + 16, 3, 0xffffff, title);
         for (int i = 0; i < n; i++) draw_text(&c, X + (W - text_w(tip[i], 2)) / 2, Y + 56 + i * 20, 2, MSP_TEAL, tip[i]);
     } else if (g_ms_caption[0]) {
@@ -8999,49 +9240,49 @@ void render_milestones(const tank_t *t, uint16_t *fb, int stride) {
             ms_genes_line(f);                    /* its form under its stage (0.4) */
             char gl[sizeof g_ms_sub];
             if (give_line(t, g_ms_row, gl, sizeof gl)) memcpy(g_ms_sub, gl, sizeof g_ms_sub);   /* GIVE has the line (0.4) */
-            else if (g_ms_sell_armed) snprintf(g_ms_sub, sizeof g_ms_sub, "TAP AGAIN TO SELL");
-            else if (can) snprintf(g_ms_sub, sizeof g_ms_sub, "WORTH %d SAND DOLLARS", worth);
-            else if (g_ms_sell_asked) snprintf(g_ms_sub, sizeof g_ms_sub, f->away ? "VISITING NEXT DOOR" : !progression_keeps_two(t, g_ms_row) ? "KEEP AT LEAST TWO FISH" : "NAME THE NEW FRY FIRST");
+            else if (g_ms_sell_armed) snprintf(g_ms_sub, sizeof g_ms_sub, "再次点击确认出售");
+            else if (can) snprintf(g_ms_sub, sizeof g_ms_sub, "价值%d枚沙币", worth);
+            else if (g_ms_sell_asked) snprintf(g_ms_sub, sizeof g_ms_sub, f->away ? "正在邻居家做客" : !progression_keeps_two(t, g_ms_row) ? "至少保留两条鱼" : "请先给新鱼苗取名");
             else g_ms_sub[0] = 0;                  /* (the line's room stays: the buttons never move) */
         }
         rect_fill(&c, X, Y, W, H, 0x04141a);
         rect_edge(&c, X, Y, W, H, MSP_TEAL); rect_edge(&c, X + 1, Y + 1, W - 2, H - 2, 0x1c2f36);
         if (g_ms_kind >= 0)                        /* the way further in: HOW?, centred at the foot (Strato: bottom
                                                       right sat too close to CLOSE for comfort) */
-            button(&c, X + (W - MSP_HOW_W) / 2, Y + H - 10 - MSP_HOW_H, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "HOW?", 2);
+            button(&c, X + (W - MSP_HOW_W) / 2, Y + H - 10 - MSP_HOW_H, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "怎么做？", 2);
         if (card && give_look(t, g_ms_row) == GV_LEAVING) {   /* accepted next door (Strato 11-01: RENAME still live "felt weird"): the
                                                                 buttons give way to a GIVEN stamp in the passport's gold - nothing to tap
                                                                 now - and the card closes by itself once the fish has gone */
-            const int by = ms_card_btn_y(t), sw = text_w("GIVEN", 3) + 28, sh = MSP_HOW_H + 6, sx0 = X + (W - sw) / 2, sy0 = by - 3;
+            const int by = ms_card_btn_y(t), sw = text_w("已送出", 3) + 28, sh = MSP_HOW_H + 6, sx0 = X + (W - sw) / 2, sy0 = by - 3;
             rect_edge(&c, sx0, sy0, sw, sh, GIVE_GOLD); rect_edge(&c, sx0 + 3, sy0 + 3, sw - 6, sh - 6, GIVE_GOLD);
-            draw_text(&c, sx0 + 14, sy0 + (sh - 21) / 2, 3, GIVE_GOLD, "GIVEN");
+            draw_text(&c, sx0 + 14, sy0 + (sh - 21) / 2, 3, GIVE_GOLD, "已送出");
             g_ms_given_uid = t->fish[g_ms_row].uid;
         } else if (card && give_look(t, g_ms_row) != GV_HIDDEN) {   /* linked: RENAME | GIVE | SELL, narrower */
             const int by = ms_card_btn_y(t);
             if (give_look(t, g_ms_row) == GV_ASKING) {   /* asking next door: no new name while the other keeper decides (Strato 11-01) */
                 rect_fill(&c, ms_card_btn3_x(0), by, MSP_CARD_BTN3_W, MSP_HOW_H, 0x04141a); rect_edge(&c, ms_card_btn3_x(0), by, MSP_CARD_BTN3_W, MSP_HOW_H, MSP_DIM);
-                draw_text(&c, ms_card_btn3_x(0) + (MSP_CARD_BTN3_W - text_w("RENAME", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_DIM, "RENAME");
-            } else button(&c, ms_card_btn3_x(0), by, MSP_CARD_BTN3_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "RENAME", 2);
+                draw_text(&c, ms_card_btn3_x(0) + (MSP_CARD_BTN3_W - text_w("改名", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_DIM, "改名");
+            } else button(&c, ms_card_btn3_x(0), by, MSP_CARD_BTN3_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "改名", 2);
             give_button(&c, ms_card_btn3_x(1), by, MSP_CARD_BTN3_W, MSP_HOW_H, give_look(t, g_ms_row), 2);
             const int sx = ms_card_btn3_x(2);
             if (!progression_fish_sellable(t, g_ms_row)) {
                 rect_fill(&c, sx, by, MSP_CARD_BTN3_W, MSP_HOW_H, 0x04141a); rect_edge(&c, sx, by, MSP_CARD_BTN3_W, MSP_HOW_H, MSP_DIM);
-                draw_text(&c, sx + (MSP_CARD_BTN3_W - text_w("SELL", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_DIM, "SELL");
+                draw_text(&c, sx + (MSP_CARD_BTN3_W - text_w("出售", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_DIM, "出售");
             } else if (g_ms_sell_armed) {
-                char ok[16]; snprintf(ok, sizeof ok, "+%d OK?", progression_fish_value(t, g_ms_row));
+                char ok[16]; snprintf(ok, sizeof ok, "换取%d枚？", progression_fish_value(t, g_ms_row));
                 button(&c, sx, by, MSP_CARD_BTN3_W, MSP_HOW_H, 0x155e58, 0x38dcc7, ok, 2);
-            } else button(&c, sx, by, MSP_CARD_BTN3_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "SELL", 2);
+            } else button(&c, sx, by, MSP_CARD_BTN3_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "出售", 2);
         } else if (card) {
             const int by = ms_card_btn_y(t);
-            button(&c, ms_card_btn_x(0), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "RENAME", 2);
+            button(&c, ms_card_btn_x(0), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "改名", 2);
             if (!progression_fish_sellable(t, g_ms_row)) {           /* not for sale: the button in the page's dim ink, the words too */
                 rect_fill(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x04141a);
                 rect_edge(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, MSP_DIM);
-                draw_text(&c, ms_card_btn_x(1) + (MSP_CARD_BTN_W - text_w("SELL", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_QUIET, "SELL");
+                draw_text(&c, ms_card_btn_x(1) + (MSP_CARD_BTN_W - text_w("出售", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_QUIET, "出售");
             } else if (g_ms_sell_armed) {
-                char ok[16]; snprintf(ok, sizeof ok, "+%d OK?", progression_fish_value(t, g_ms_row));
+                char ok[16]; snprintf(ok, sizeof ok, "换取%d枚？", progression_fish_value(t, g_ms_row));
                 button(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x155e58, 0x38dcc7, ok, 2);
-            } else button(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "SELL", 2);
+            } else button(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "出售", 2);
         }
         if (g_ms_icon) blit_icon_scaled(&c, X + (W - g_ms_icon->w * 2) / 2, Y + 16 + (32 - g_ms_icon->w), g_ms_icon, 2, g_ms_lit);
         else if (g_ms_fish >= 0 && g_ms_fish < t->n_fish) {
@@ -9165,13 +9406,13 @@ static int ms_open(const tank_t *t, int row, bool tank_row, bool fry_row, int k,
     if (fry_row) {
         if (k < 0) {                                 /* the name: the tally, and when it comes */
             int met = 0; for (int i = 0; i < nreq; i++) met += req[i].met;
-            snprintf(g_ms_title, sizeof g_ms_title, "NEW FRY");
-            if (staged) { snprintf(g_ms_caption, sizeof g_ms_caption, "EVERY STEP IS DONE. A FRY");   /* the spawning, 2026-09-24 */
-                          snprintf(g_ms_caption2, sizeof g_ms_caption2, "WILL BE BORN IN THE GRASS");
-                          snprintf(g_ms_sub, sizeof g_ms_sub, "ON ITS WAY"); }
-            else { snprintf(g_ms_caption, sizeof g_ms_caption, "WHEN ALL NEEDS ARE MET, A");     /* Strato's words, 2026-09-14 */
-                   snprintf(g_ms_caption2, sizeof g_ms_caption2, "NEW FRY IS READY TO BE BORN");
-                   snprintf(g_ms_sub, sizeof g_ms_sub, "%d OF %d DONE", met, nreq); }
+            snprintf(g_ms_title, sizeof g_ms_title, "新鱼苗");
+            if (staged) { snprintf(g_ms_caption, sizeof g_ms_caption, "条件已满足，新鱼苗");   /* the spawning, 2026-09-24 */
+                          snprintf(g_ms_caption2, sizeof g_ms_caption2, "即将在水草间诞生");
+                          snprintf(g_ms_sub, sizeof g_ms_sub, "正在准备中"); }
+            else { snprintf(g_ms_caption, sizeof g_ms_caption, "满足全部条件后");     /* Strato's words, 2026-09-14 */
+                   snprintf(g_ms_caption2, sizeof g_ms_caption2, "新的鱼苗就能诞生");
+                   snprintf(g_ms_sub, sizeof g_ms_sub, "已完成%d/%d项", met, nreq); }
             g_ms_lit = staged; g_ms_icon = NULL; g_ms_fish = -1; g_ms_fry = true;
         } else if (k < nreq) {                       /* a gate: the words, and where it stands */
             const fry_req_t *r = &req[k];
@@ -9184,14 +9425,14 @@ static int ms_open(const tank_t *t, int row, bool tank_row, bool fry_row, int k,
         } else return MS_TAP_NONE;
     } else if (tank_row) {
         if (k < 0) {
-            snprintf(g_ms_title, sizeof g_ms_title, "TANK");
-            snprintf(g_ms_caption, sizeof g_ms_caption, "%d OF %d FISH SO FAR", t->n_fish, POP_CAP);
+            snprintf(g_ms_title, sizeof g_ms_title, "鱼缸");
+            snprintf(g_ms_caption, sizeof g_ms_caption, "当前%d/%d条鱼", t->n_fish, POP_CAP);
             g_ms_lit = true; g_ms_icon = NULL; g_ms_fish = -1;
         } else {
             uint32_t bit = tank_badge(t, k)->bit; bool on = (t->tank_ms_bits & bit) != 0;
             g_ms_tpage = k / MSP_TANK_PER_ROW;       /* the arrows can cross pages: the row follows */
-            snprintf(g_ms_title, sizeof g_ms_title, on ? "TANK" : "NOT YET");
-            snprintf(g_ms_caption, sizeof g_ms_caption, "%s", TMS_NAMES[bit_index(bit)]);
+            snprintf(g_ms_title, sizeof g_ms_title, on ? "鱼缸" : "尚未完成");
+            snprintf(g_ms_caption, sizeof g_ms_caption, "%s", ui_zh_label(TMS_NAMES[bit_index(bit)]));
             g_ms_lit = on; g_ms_icon = tank_badge(t, k)->icon; g_ms_fish = -1;
         }
     } else {
@@ -9203,8 +9444,8 @@ static int ms_open(const tank_t *t, int row, bool tank_row, bool fry_row, int k,
             g_ms_lit = true; g_ms_icon = NULL; g_ms_fish = row;
         } else {
             uint32_t bit = FISH_BADGES[k].bit; bool on = (f->ms_bits & bit) != 0;
-            snprintf(g_ms_title, sizeof g_ms_title, "%s", on ? f->name : "NOT YET");
-            snprintf(g_ms_caption, sizeof g_ms_caption, "%s", MS_NAMES[bit_index(bit)]);
+            snprintf(g_ms_title, sizeof g_ms_title, "%s", on ? f->name : "尚未完成");
+            snprintf(g_ms_caption, sizeof g_ms_caption, "%s", ui_zh_label(MS_NAMES[bit_index(bit)]));
             g_ms_lit = on; g_ms_icon = FISH_BADGES[k].icon; g_ms_fish = -1;
         }
     }
@@ -9257,9 +9498,9 @@ bool render_collection_arrow(bool right, int *x, int *y) {
     return true;
 }
 static void fmt_dur(char *out, size_t n, uint32_t s) {
-    if (s < 60) snprintf(out, n, "%u S", (unsigned)s);
-    else if (s < 3600) snprintf(out, n, "%u MIN", (unsigned)(s / 60));
-    else snprintf(out, n, "%u H %u MIN", (unsigned)(s / 3600), (unsigned)(s % 3600 / 60));
+    if (s < 60) snprintf(out, n, "%u秒", (unsigned)s);
+    else if (s < 3600) snprintf(out, n, "%u分钟", (unsigned)(s / 60));
+    else snprintf(out, n, "%u小时%u分钟", (unsigned)(s / 3600), (unsigned)(s % 3600 / 60));
 }
 /* a fish left and the slots shifted (progression: a sale, a gift): the keeper page's card and its armed SELL follow their
    fish; the card of the one that left closes (the 11-02 sweep: SELL armed by row sold the fish that slid into it) */
@@ -9272,9 +9513,9 @@ void render_fish_removed(int idx) {
 }
 static void fmt_met(char *out, size_t n, uint32_t met) {
     int64_t now = clock_port_now_unix();
-    if (!met || now <= 0 || now < met) { snprintf(out, n, "ON THIS GLASS"); return; }   /* (a board without a clock) */
+    if (!met || now <= 0 || now < met) { snprintf(out, n, "本鱼缸"); return; }   /* (a board without a clock) */
     uint32_t d = (uint32_t)((now - met) / 86400);
-    if (d == 0) snprintf(out, n, "TODAY"); else if (d == 1) snprintf(out, n, "YESTERDAY"); else snprintf(out, n, "%u DAYS AGO", (unsigned)d);
+    if (d == 0) snprintf(out, n, "今天"); else if (d == 1) snprintf(out, n, "昨天"); else snprintf(out, n, "%u天前", (unsigned)d);
 }
 static void entry_fish(fish_t *f, const coll_entry_t *e) {
     memset(f, 0, sizeof *f);
@@ -9292,20 +9533,20 @@ static void entry_card_draw(ctx_t *c, uint16_t *fb, int stride, const coll_entry
         for (int x = X + 3; x < X + W - 3; x++) px_blend(c, x, y + (int)(2.0f * sinf(x * 0.11f + y * 0.37f)), 0x2b4a63, 80);
     src_t band = src_color(INK, 1.0f);
     for (int y = Y; y < Y + 26; y++) span(c, X, X + W - 1, y, &band, 255);
-    draw_text(c, X + (W - text_w("POCKET TANK PASSPORT", 2)) / 2, Y + 7, 2, GOLD, "POCKET TANK PASSPORT");
+    draw_text(c, X + (W - text_w("口袋鱼缸访客护照", 2)) / 2, Y + 7, 2, GOLD, "口袋鱼缸访客护照");
     rect_edge(c, X, Y, W, H, GOLD); rect_edge(c, X + 1, Y + 1, W - 2, H - 2, INK);
     const int PX = X + 12, PY = Y + 36, PW = 100, PH = 84;
     rect_fill(c, PX, PY, PW, PH, 0x0a1824); rect_edge(c, PX, PY, PW, PH, 0x9fd8e2);
     fish_t f; entry_fish(&f, e);
     render_fish_portrait(fb, stride, PX + PW / 2.0f - PAGE_X, PY + PH / 2.0f - PAGE_Y, 1.3f, &f, PW - 20, clock);
     const int FX = PX + PW + 12;
-    static const char *const STAGE_W[4] = { "FRY", "JUVENILE", "ADULT", "ELDER" };
+    static const char *const STAGE_W[4] = { "鱼苗", "幼鱼", "成鱼", "老鱼" };
     char home[24], form[24], met[24], here[24], visits[24];
-    char hlbl[40]; home_fields(e->home, e->home_name, "HOME", hlbl, sizeof hlbl, home, sizeof home);
-    snprintf(form, sizeof form, "%s %s", SHAPE_NAMES[e->shape % SHAPE_N], FINS_NAMES[e->fins % FINS_N]);
+    char hlbl[40]; home_fields(e->home, e->home_name, "家园", hlbl, sizeof hlbl, home, sizeof home);
+    snprintf(form, sizeof form, "%s %s", ui_zh_label(SHAPE_NAMES[e->shape % SHAPE_N]), ui_zh_label(FINS_NAMES[e->fins % FINS_N]));
     fmt_met(met, sizeof met, e->met_unix); fmt_dur(here, sizeof here, e->here_s);
-    snprintf(visits, sizeof visits, "%u VISIT%s", (unsigned)e->visits, e->visits == 1 ? "" : "S");
-    struct { const char *lbl, *val; } FL[4] = { { "NAME", f.name }, { hlbl, home }, { "FORM", form }, { "STAGE", STAGE_W[e->stage & 3] } };
+    snprintf(visits, sizeof visits, "到访%u次%s", (unsigned)e->visits, e->visits == 1 ? "" : "");
+    struct { const char *lbl, *val; } FL[4] = { { "名字", f.name }, { hlbl, home }, { "外形", form }, { "成长阶段", STAGE_W[e->stage & 3] } };
     for (int i = 0; i < 4; i++) {
         int fy = Y + 33 + i * 26;
         draw_text(c, FX, fy, 1, LBL, FL[i].lbl);
@@ -9313,18 +9554,18 @@ static void entry_card_draw(ctx_t *c, uint16_t *fb, int stride, const coll_entry
         draw_text(c, vx, fy + 10, 2, 0xffffff, FL[i].val);
     }
     /* its history here: first met, visits, time in this water, fry */
-    draw_text(c, PX, PY + PH + 6, 1, LBL, "FIRST MET");
+    draw_text(c, PX, PY + PH + 6, 1, LBL, "首次相遇");
     draw_text(c, PX, PY + PH + 15, 2, 0xffffff, met);
-    draw_text(c, FX, Y + 139, 1, LBL, "IN YOUR TANK");
+    draw_text(c, FX, Y + 139, 1, LBL, "在你的鱼缸中");
     draw_text(c, FX, Y + 148, 2, 0xffffff, here);
-    draw_text(c, PX, PY + PH + 34, 1, LBL, "VISITS");
+    draw_text(c, PX, PY + PH + 34, 1, LBL, "到访次数");
     draw_text(c, PX, PY + PH + 43, 2, 0xffffff, visits);
     if (e->fry) {
-        char fr[24]; snprintf(fr, sizeof fr, "%u FRY HERE", (unsigned)e->fry);
-        draw_text(c, FX, Y + 167, 1, LBL, "FAMILY");
+        char fr[96]; snprintf(fr, sizeof fr, "这里诞生了%u条鱼苗", (unsigned)e->fry);
+        draw_text(c, FX, Y + 167, 1, LBL, "家族");
         draw_text(c, FX, Y + 176, 2, 0xffffff, fr);
     }
-    const char *st = "COLLECTED";                      /* the stamp, as on its card */
+    const char *st = "已收藏";                      /* the stamp, as on its card */
     int sw = text_w(st, 2) + 12, sx0 = X + W - sw - 10, sy0 = Y + 139;
     rect_edge(c, sx0, sy0, sw, 24, GOLD); rect_edge(c, sx0 + 2, sy0 + 2, sw - 4, 20, GOLD);
     draw_text(c, sx0 + 6, sy0 + 5, 2, GOLD, st);
@@ -9336,17 +9577,17 @@ static void entry_card_draw(ctx_t *c, uint16_t *fb, int stride, const coll_entry
 }
 /* the page's words and pips in the foot, left of CLOSE (the bowl: two lines in UPGRADES' place, the pips under the grid) */
 static void coll_pager(ctx_t *c, int pg, int np) {
-    char line[32];
+    char line[96];
 #if defined(TANK_ROUND)
-    char l2[24]; snprintf(line, sizeof line, "PAGE %d", pg + 1); snprintf(l2, sizeof l2, "OF %d", np);
+    char l2[24]; snprintf(line, sizeof line, "第%d页", pg + 1); snprintf(l2, sizeof l2, "共%d页", np);
     draw_text(c, 114 + (116 - text_w(line, 2)) / 2, MSP_CLOSE_Y, 2, 0xffffff, line);
     draw_text(c, 114 + (116 - text_w(l2, 2)) / 2, MSP_CLOSE_Y + 16, 2, 0xffffff, l2);
     int bx0 = (PAGE_W - (np * COLL_PIP - 4)) / 2, by = COLL_Y0 + 3 * COLL_CH + 3;
 #else
-    snprintf(line, sizeof line, "PAGE %d OF %d", pg + 1, np);
+    snprintf(line, sizeof line, "第%d页，共%d页", pg + 1, np);
     int ty = MSP_CLOSE_Y + (MSP_CLOSE_H - 14) / 2, tx = 32;   /* (as far in as CLOSE stands from the right) */
     draw_text(c, tx, ty, 2, 0xffffff, line);
-    char widest[32]; snprintf(widest, sizeof widest, "PAGE %d OF %d", np, np);   /* (the pips stand still page to page) */
+    char widest[96]; snprintf(widest, sizeof widest, "第%d页，共%d页", np, np);   /* (the pips stand still page to page) */
     int bx0 = tx + text_w(widest, 2) + 12, by = ty + 4;
 #endif
     for (int p = 0; p < np; p++) {
@@ -9357,10 +9598,10 @@ static void coll_pager(ctx_t *c, int pg, int np) {
 void render_collection(const tank_t *t, uint16_t *fb, int stride) {
     ctx_t c = ctx_page(fb, stride);
     for (int y = 0; y < TANK_H; y++) for (int x = 0; x < TANK_W; x++) fb[y * stride + x] = rgb565(MSP_INK, 1);   /* (the milestones page's backdrop) */
-    char line[32]; int n = collection_count(), np = collection_pages();
+    char line[96]; int n = collection_count(), np = collection_pages();
     if (g_coll_page >= np) g_coll_page = np - 1;
-    draw_text(&c, (PAGE_W - text_w("VISITOR COLLECTION", 2)) / 2, 22, 2, 0xe8c872, "VISITOR COLLECTION");
-    snprintf(line, sizeof line, "%d OF %d COLLECTED", n, COLL_MAX);
+    draw_text(&c, (PAGE_W - text_w("访客图鉴", 2)) / 2, 22, 2, 0xe8c872, "访客图鉴");
+    snprintf(line, sizeof line, "已收集%d/%d", n, COLL_MAX);
     draw_text(&c, (PAGE_W - text_w(line, 1)) / 2, 42, 1, MSP_TEAL, line);
     if (np > 1) {
         crit_nav_box(&c, COLL_NAV_X, COLL_NAV_Y, -1, 0x9fd8e2);
@@ -9377,7 +9618,7 @@ void render_collection(const tank_t *t, uint16_t *fb, int stride) {
         render_fish_portrait(fb, stride, cx + COLL_CW / 2.0f, cy + 30, 0.9f, &f, COLL_CW - 26, t->clock + j * 0.7f);
         draw_text(&c, cx + (COLL_CW - text_w(f.name, 2)) / 2, cy + 52, 2, 0xffffff, f.name);
     }
-    button(&c, MSP_CLOSE_X, MSP_CLOSE_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "CLOSE", 2);
+    button(&c, MSP_CLOSE_X, MSP_CLOSE_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "关闭", 2);
     if (g_coll_sel >= 0 && g_coll_sel < n) {           /* its passport, the page dimmed under it */
         for (int y = 0; y < TANK_H; y++) for (int x = 0; x < TANK_W; x++) fb[y * stride + x] = (uint16_t)((fb[y * stride + x] >> 1) & 0x7bef);
         ctx_t fc = ctx_full(fb, stride, 1.0f);
@@ -9439,20 +9680,20 @@ void render_notice(const tank_t *t, uint16_t *fb, int stride, int kind, int fish
     const int X = MSP_MODAL_X, W = MSP_MODAL_W, Y = MSP_MODAL_Y, H = MSP_MODAL_H;
     rect_fill(&c, X, Y, W, H, 0x04141a);
     rect_edge(&c, X, Y, W, H, MSP_TEAL); rect_edge(&c, X + 1, Y + 1, W - 2, H - 2, 0x1c2f36);
-    char title[FISH_NAME_MAX + 16] = "THE TANK", caption[40] = "";
+    char title[FISH_NAME_MAX + 16] = "鱼缸", caption[40] = "";
     const char *caption2 = NULL;                              /* a second line: the title and both move up */
     const icon_t *ic = NULL;
     const fish_t *f = fish >= 0 && fish < t->n_fish ? &t->fish[fish] : NULL;
     if (kind == 6 || kind == 7) {                             /* NOTICE_MODEL_DAMAGED (2026-10-21): the AI model is damaged; */
         if (kind == 7) {                                      /* NOTICE_WRONG_BOARD (0.3.9.3): this version is another board's */
             const char *w = pt_board_words(board_port_hw());
-            snprintf(title, sizeof title, "WRONG VERSION");
-            snprintf(caption, sizeof caption, "THIS IS THE %s", w ? w : "BOARD");
-            caption2 = "CHECK FOR UPDATES FIXES IT";
+            snprintf(title, sizeof title, "固件版本不匹配");
+            snprintf(caption, sizeof caption, "当前固件适用于%s", w ? w : "开发板");
+            caption2 = "请使用适配本板的固件";
         } else {
-            snprintf(title, sizeof title, "AI MODEL DAMAGED");
-            snprintf(caption, sizeof caption, "REINSTALL AT POCKETANK.COM");
-            caption2 = "YOUR FISH ARE SAFE";
+            snprintf(title, sizeof title, "模型校验异常");
+            snprintf(caption, sizeof caption, "请重新烧录模型文件");
+            caption2 = "鱼儿存档已保留";
         }
         /* a warning triangle with an exclamation mark: the shape says it, not the hue */
         const int TH = 34, PX = X + W / 2, PY = Y + 14;      /* apex at the top, base TH below */
@@ -9464,9 +9705,9 @@ void render_notice(const tank_t *t, uint16_t *fb, int stride, int kind, int fish
         rect_fill(&c, PX - 1, PY + 11, 3, 13, MSP_TEAL);      /* ! */
         rect_fill(&c, PX - 1, PY + 27, 3, 3, MSP_TEAL);
     } else if (kind == 5) {                                   /* NOTICE_LIGHTS_OUT (2026-10-03): the first double-tap that turned the light off */
-        snprintf(title, sizeof title, "LIGHTS OUT");
-        snprintf(caption, sizeof caption, "YOU DOUBLE-TAPPED THE GLASS");
-        caption2 = "DOUBLE-TAP TO TURN IT ON";
+        snprintf(title, sizeof title, "关灯");
+        snprintf(caption, sizeof caption, "你刚刚双击了玻璃");
+        caption2 = "再次双击即可开灯";
         /* a crescent moon: a disc with a bite out of it */
         const int R = 20, PX = X + W / 2 - 3, PY = Y + 36;
         for (int dy = -R; dy <= R; dy++) for (int dx = -R; dx <= R; dx++) {
@@ -9474,16 +9715,16 @@ void render_notice(const tank_t *t, uint16_t *fb, int stride, int kind, int fish
             if (dx * dx + dy * dy <= R * R && bx * bx + by * by > 17 * 17) rect_fill(&c, PX + dx, PY + dy, 1, 1, MSP_TEAL);
         }
     } else if (kind == 4) {                                   /* NOTICE_UPDATED (2026-09-30): the first boot of a new release */
-        snprintf(title, sizeof title, "UPDATED");
-        snprintf(caption, sizeof caption, "YOUR TANK IS NOW V%s", PT_RELEASE);
+        snprintf(title, sizeof title, "更新完成");
+        snprintf(caption, sizeof caption, "当前版本为V%s", PT_RELEASE);
         /* a tick in a ring, teal: the shape says it, not the hue */
         const int R = 22, PX = X + W / 2, PY = Y + 48;
         ring(&c, PX, PY, R, MSP_TEAL); ring(&c, PX, PY, R - 1, MSP_TEAL);
         for (int i = 0; i < 6; i++)  rect_fill(&c, PX - 11 + i, PY + i - 1, 3, 3, MSP_TEAL);
         for (int i = 0; i < 12; i++) rect_fill(&c, PX - 6 + i, PY + 4 - i, 3, 3, MSP_TEAL);
     } else if (kind == 3) {                                   /* NOTICE_LOW_BATTERY */
-        snprintf(title, sizeof title, "LOW BATTERY");
-        snprintf(caption, sizeof caption, "PLEASE CHARGE THE TANK");
+        snprintf(title, sizeof title, "电量偏低");
+        snprintf(caption, sizeof caption, "请为鱼缸充电");
         /* the pill, large: outline + nub, the last sliver lit red */
         const int PW = 60, PH = 28, PX = X + (W - PW) / 2, PY = Y + 34;
         rect_edge(&c, PX, PY, PW, PH, 0x9fb4b8); rect_edge(&c, PX + 1, PY + 1, PW - 2, PH - 2, 0x9fb4b8);
@@ -9491,13 +9732,13 @@ void render_notice(const tank_t *t, uint16_t *fb, int stride, int kind, int fish
         rect_fill(&c, PX + 4, PY + 4, 7, PH - 8, 0xf25b65);
     } else if (kind == 2) {                                   /* NOTICE_STAGE */
         if (f) { snprintf(title, sizeof title, "%s", f->name);
-                 snprintf(caption, sizeof caption, "IS NOW %s %s", f->stage == STAGE_ADULT || f->stage == STAGE_ELDER ? "AN" : "A", STAGE_WORDS[f->stage & 3]);
+                 snprintf(caption, sizeof caption, "已长成%s", STAGE_WORDS[f->stage & 3]);
                  render_fish_preview(fb, stride, X + W / 2, Y + 48, f->size * 1.6f, f->color, f->fin, f->accent, f, FISH_ROOM_CARD, t->clock); }
     } else if (kind == 1) {                                   /* NOTICE_TANK_MILESTONE */
         for (int k = 0; k < TANK_BADGE_N; k++) if (TANK_BADGES[k].bit == bit) ic = TANK_BADGES[k].icon;
         int bi = 0; while (bi < 31 && !(bit & (1u << bi))) bi++;
-        snprintf(caption, sizeof caption, "%s", bi < TMS_COUNT ? TMS_NAMES[bi] : "");
-        if (bit == TMS_FIRST_SALE) caption2 = "FRY NOW IN THE SHOP";   /* what the sale opened (0.3.5) */
+        snprintf(caption, sizeof caption, "%s", bi < TMS_COUNT ? ui_zh_label(TMS_NAMES[bi]) : "");
+        if (bit == TMS_FIRST_SALE) caption2 = "商店有新鱼苗了";   /* what the sale opened (0.3.5) */
         if (!ic && t->n_fish) {                               /* a population milestone: the fish that made the count (F3) */
             const fish_t *n = &t->fish[fish >= 0 && fish < t->n_fish ? fish : progression_newest(t)];   /* (the notice's own: R-seam S2) */
             render_fish_preview(fb, stride, X + W / 2, Y + 48, n->size * 1.6f, n->color, n->fin, n->accent, n, FISH_ROOM_CARD, t->clock);
@@ -9506,7 +9747,7 @@ void render_notice(const tank_t *t, uint16_t *fb, int stride, int kind, int fish
         for (int k = 0; k < 6; k++) if (FISH_BADGES[k].bit == bit) ic = FISH_BADGES[k].icon;
         int bi = 0; while (bi < 31 && !(bit & (1u << bi))) bi++;
         if (f) snprintf(title, sizeof title, "%s", f->name);
-        snprintf(caption, sizeof caption, "%s", bi < MS_FISH_COUNT ? MS_NAMES[bi] : "");
+        snprintf(caption, sizeof caption, "%s", bi < MS_FISH_COUNT ? ui_zh_label(MS_NAMES[bi]) : "");
         if (!ic && f) render_fish_preview(fb, stride, X + W / 2, Y + 48, f->size * 1.6f, f->color, f->fin, f->accent, f, FISH_ROOM_CARD, t->clock);
     }
     if (ic) blit_icon_scaled(&c, X + (W - ic->w * 2) / 2, Y + 16 + (32 - ic->w), ic, 2, true);
@@ -9563,7 +9804,7 @@ static bool shp_fry(const tank_t *t) { return progression_fry_for_sale(t); }
 /* THE SHOP'S AREAS (0.4.1; Strato 11-04, the look from working-assets/shop-navigation-v1): DECORATIONS, CRITTERS and
  * BACKGROUNDS, each a square tab in the foot, three rows a page. A row is an item (0..), the FRY (-1: CRITTERS' first
  * while one is for sale) or a background (SHP_ROW_BG + bg). The pumpkin's row shows while this build sells it (or owned). */
-static const char *const SHP_AREA_NAME[SHP_AREAS] = { "DECORATIONS", "CRITTERS", "BACKGROUNDS" };
+static const char *const SHP_AREA_NAME[SHP_AREAS] = { "装饰", "小生物", "背景" };
 #define SHP_ROW_BG  SHOP_ROW_BG
 #define SHP_MODAL_BG 200             /* g_shp_modal: a background's modal (+ bg) */
 static int g_shp_area;
@@ -9597,10 +9838,10 @@ static void shop_bg_row(ctx_t *c, const tank_t *t, int bg, int top) {   /* a bac
     const bool owned = shp_bg_owned(t, bg), now = t->bg_now == bg, can = t->sd_balance >= SD_PRICE_BG;
     blit_icon(c, 32, top, bg_thumb(bg), 255);
     draw_text(c, 76, top + 2, 2, 0xffffff, bg_name(bg));
-    if (now) draw_text(c, 76, top + 20, 2, MSP_TEAL, "IN USE");
-    else if (owned) draw_text(c, 76, top + 20, 2, MSP_TEAL, "OWNED");
+    if (now) draw_text(c, 76, top + 20, 2, MSP_TEAL, "使用中");
+    else if (owned) draw_text(c, 76, top + 20, 2, MSP_TEAL, "已拥有");
     else price_tag(c, 76, top + 20, SD_PRICE_BG, can ? MSP_TEAL : MSP_QUIET);
-    const char *lab = now ? "IN USE" : owned ? "USE" : "UNLOCK";
+    const char *lab = now ? "使用中" : owned ? "使用" : "解锁";
     if (now || (!owned && !can)) button(c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, now ? MSP_INK : 0x1c2f36, MSP_DIM, lab, 2);
     else { button(c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, lab, 2);
            draw_text(c, SHP_BTN_X + (SHP_BTN_W - text_w(lab, 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, lab); }
@@ -9631,8 +9872,8 @@ static void shop_foot(ctx_t *c) {
 }
 static void fry_hours(char *out, size_t n) {   /* "NEW FRY IN 14 H" / "IN 40 MIN" */
     float s = progression_fry_new_in_s();
-    if (s >= 3600) snprintf(out, n, "NEW FRY IN %d H", (int)((s + 1799) / 3600));
-    else snprintf(out, n, "NEW FRY IN %d MIN", (int)(s / 60) + 1);
+    if (s >= 3600) snprintf(out, n, "%d小时后有新鱼苗", (int)((s + 1799) / 3600));
+    else snprintf(out, n, "%d分钟后有新鱼苗", (int)(s / 60) + 1);
 }
 static void fry_draw(uint16_t *fb, int stride, float x, float y, float size, const fry_offer_t *o, double clock) {
     fish_t f; memset(&f, 0, sizeof f);
@@ -9649,10 +9890,10 @@ static void shop_fry_row(ctx_t *c, const tank_t *t, uint16_t *fb, int stride, in
     int k = fry_first_left();
     bool room = progression_fry_room_to_buy(t), can = t->sd_balance >= SD_PRICE_FRY;
     if (k >= 0) { fry_offer_t o; progression_fry_offer(k, &o); fry_draw(fb, stride, 48, top + 16, 0.9f, &o, t->clock); }
-    draw_text(c, 76, top + 2, 2, 0xffffff, "FRY");
+    draw_text(c, 76, top + 2, 2, 0xffffff, "鱼苗");
     if (k < 0) { char l[24]; fry_hours(l, sizeof l); draw_text(c, 76, top + 20, 2, MSP_QUIET, l); }
     else price_tag(c, 76, top + 20, SD_PRICE_FRY, can && room ? MSP_TEAL : MSP_QUIET);
-    const char *b = k < 0 ? "SOLD OUT" : !room ? "FULL" : "CHOOSE";
+    const char *b = k < 0 ? "已售罄" : !room ? "已满" : "选择";
     if (k >= 0 && room && can) { button(c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, b, 2);
                                  draw_text(c, SHP_BTN_X + (SHP_BTN_W - text_w(b, 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, b); }
     else button(c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, 0x1c2f36, MSP_DIM, b, 2);
@@ -9661,7 +9902,7 @@ static void shop_fry_modal(ctx_t *c, const tank_t *t, uint16_t *fb, int stride) 
     const int X = SHP_MODAL_X, Y = SHP_MODAL_Y, W = SHP_MODAL_W, H = SHP_MODAL_H;
     rect_fill(c, X, Y, W, H, 0x04141a);
     rect_edge(c, X, Y, W, H, MSP_TEAL); rect_edge(c, X + 1, Y + 1, W - 2, H - 2, 0x1c2f36);
-    draw_text(c, X + (W - text_w("FRY FOR SALE", 3)) / 2, Y + 14, 3, 0xffffff, "FRY FOR SALE");
+    draw_text(c, X + (W - text_w("鱼苗出售中", 3)) / 2, Y + 14, 3, 0xffffff, "鱼苗出售中");
     for (int k = 0; k < FRY_OFFER_N; k++) {
         fry_offer_t o; progression_fry_offer(k, &o);
         int bx = SHP_FRY_BOX_X(k), by = SHP_FRY_BOX_Y;
@@ -9674,24 +9915,24 @@ static void shop_fry_modal(ctx_t *c, const tank_t *t, uint16_t *fb, int stride) 
         fry_draw(fb, stride, bx + SHP_FRY_BOX_W / 2, by + 34, 1.5f, &o, t->clock + k * 0.7f);
         /* its body in words, where the color squares were (the adult shows its colors) - the body alone, Strato 11-01: the fins and
            the pattern were too tiny to read, "and we can leave a bit of mystery there" */
-        draw_text(c, bx + (SHP_FRY_BOX_W - text_w(SHAPE_NAMES[o.shape], 2)) / 2, by + SHP_FRY_BOX_H - 20, 2, lit ? 0xffffff : 0x9fd8e2, SHAPE_NAMES[o.shape]);
+        draw_text(c, bx + (SHP_FRY_BOX_W - text_w(ui_zh_label(SHAPE_NAMES[o.shape]), 2)) / 2, by + SHP_FRY_BOX_H - 20, 2, lit ? 0xffffff : 0x9fd8e2, ui_zh_label(SHAPE_NAMES[o.shape]));
     }
     bool room = progression_fry_room_to_buy(t), can = t->sd_balance >= SD_PRICE_FRY;
     fry_offer_t pk; progression_fry_offer(g_shp_fry_pick, &pk);
 
     bool go = room && can && !pk.sold && progression_fry_left() > 0;
-    char line[32]; snprintf(line, sizeof line, "%d", SD_PRICE_FRY);
+    char line[96]; snprintf(line, sizeof line, "%d", SD_PRICE_FRY);
     price_tag(c, X + (W - 20 - text_w(line, 2)) / 2, Y + 138, SD_PRICE_FRY, go ? 0xffffff : MSP_QUIET);
-    if (!room) snprintf(line, sizeof line, progression_fish_held(t) >= POP_CAP ? "THE TANK IS FULL" : "WELCOME THE NEW FRY");   /* (a place held for a gift or a fry next door: full) */
-    else if (!can) snprintf(line, sizeof line, "YOU HAVE %d", (int)t->sd_balance);
+    if (!room) snprintf(line, sizeof line, progression_fish_held(t) >= POP_CAP ? "鱼缸已满" : "欢迎新鱼苗");   /* (a place held for a gift or a fry next door: full) */
+    else if (!can) snprintf(line, sizeof line, "你有%d枚沙币", (int)t->sd_balance);
     else line[0] = 0;
     if (line[0]) draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 160, 2, MSP_QUIET, line);
     fry_hours(line, sizeof line);
     draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 180, 2, MSP_QUIET, line);
     const int bx = X + (W - MSP_HOW_W) / 2, by = Y + H - 12 - MSP_HOW_H;
-    if (go) { button(c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "BUY", 2);
-              draw_text(c, bx + (MSP_HOW_W - text_w("BUY", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "BUY"); }
-    else button(c, bx, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "BUY", 2);
+    if (go) { button(c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "购买", 2);
+              draw_text(c, bx + (MSP_HOW_W - text_w("购买", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "购买"); }
+    else button(c, bx, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "购买", 2);
 }
 /* the shelf's words (0.3.9): the line under IN THE TANK / ON THE SHELF in a
  * placeable piece's modal - a living piece on the shelf says how far it has
@@ -9699,11 +9940,11 @@ static void shop_fry_modal(ctx_t *c, const tank_t *t, uint16_t *fb, int stride) 
  * sells it (so a SELL is an informed one). NULL = nothing to say. */
 static const char *shelf_line(const tank_t *t, int item, char *out, size_t n) {
     bool shelved = (t->sd_shelved & SD_ITEMS[item].bit) != 0;
-    if (item == 8 && !SD_PUMPKIN_IN_SHOP) return "NOT IN THE SHOP NOW";
-    if (!shelved) return tank_decor_locked(t, item) ? "LOCKED IN PLACE" : NULL;   /* (0.3.9: why a hold on it opens nothing; MOVE is the way to its page) */
-    if (item == 3) { snprintf(out, n, "GROWING  %d%%", (int)(tank_coral_growth(t) * 100 / CORAL_FULL + 0.5f)); return out; }
-    if (item == 4) { snprintf(out, n, "GROWING  %d%%", (int)(tank_cluster_growth(t) * 100 / CLUSTER_FULL + 0.5f)); return out; }
-    if (item == 0) return "GROWING";
+    if (item == 8 && !SD_PUMPKIN_IN_SHOP) return "商店暂未供应";
+    if (!shelved) return tank_decor_locked(t, item) ? "位置已锁定" : NULL;   /* (0.3.9: why a hold on it opens nothing; MOVE is the way to its page) */
+    if (item == 3) { snprintf(out, n, "成长中 %d%%", (int)(tank_coral_growth(t) * 100 / CORAL_FULL + 0.5f)); return out; }
+    if (item == 4) { snprintf(out, n, "成长中 %d%%", (int)(tank_cluster_growth(t) * 100 / CLUSTER_FULL + 0.5f)); return out; }
+    if (item == 0) return "成长中";
     return NULL;
 }
 /* the shelf's little tanks (0.3.9, Strato: "represented inside a small
@@ -9752,7 +9993,7 @@ static void shelf_build(const tank_t *t, int item, uint16_t *fb, int stride) {
     g_shelf_key[k] = key;
     int cx = (int)tank_decor_x(t, item), top, side = shelf_window(t, item, &top);
     CTX_MADE();
-    ctx_t c = { fb, stride, 1.0f, cx - side / 2, top, side, side };   /* the window lands at the frame's top left */
+    ctx_t c = { fb, stride, 1.0f, cx - side / 2, top, side, side, NULL, 0, 0 };   /* the window lands at the frame's top left */
     rect_fill(&c, c.ox, c.oy, side, side, SHELF_WATER);
     rect_fill(&c, c.ox, TANK_BOT - 16, side, c.oy + side - (TANK_BOT - 16), SHELF_SAND);
     int bx0, by0, bx1, by1;
@@ -9794,7 +10035,7 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
     ctx_t c = ctx_page(fb, stride);
     rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
     blit_icon(&c, SHP_COIN_X, SHP_COIN_Y, &icon_shop_sand_dollar_64, 255);
-    draw_text(&c, SHP_HEAD_X, SHP_COIN_Y + 6, 2, MSP_TEAL, "SAND DOLLARS");
+    draw_text(&c, SHP_HEAD_X, SHP_COIN_Y + 6, 2, MSP_TEAL, "沙币");
     char bal[16]; snprintf(bal, sizeof bal, "%d", (int)t->sd_balance);
     draw_text(&c, SHP_HEAD_X, SHP_COIN_Y + 28, 4, 0xffffff, bal);
     for (int x = 24; x < PAGE_W - 24; x++) px_blend(&c, x, SHP_ROW_Y0 - 10, MSP_DIM, 200);
@@ -9815,15 +10056,15 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
         if (shelved) shelf_slot(&c, 32, top, t, i, 1);                                                             /* the shelf (0.3.9): the piece as it is, in its little tank */
         else if (owned) blit_icon(&c, 32, top, shop_icon(i), 255); else blit_icon_locked(&c, 32, top, shop_icon(i));   /* (the rows are where the bowl is wide: their own column) */
         draw_text(&c, 76, top + 2, 2, 0xffffff, it->name);
-        if (shelved) draw_text(&c, 76, top + 20, 2, MSP_TEAL, "ON THE SHELF");
-        else if (owned) draw_text(&c, 76, top + 20, 2, MSP_TEAL, "IN THE TANK");
+        if (shelved) draw_text(&c, 76, top + 20, 2, MSP_TEAL, "已收纳");
+        else if (owned) draw_text(&c, 76, top + 20, 2, MSP_TEAL, "已放入鱼缸");
         else price_tag(&c, 76, top + 20, it->price, can ? MSP_TEAL : MSP_QUIET);
-        if (shelved) { button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, "PUT BACK", 2);          /* live: one tap returns it */
-                       draw_text(&c, SHP_BTN_X + (SHP_BTN_W - text_w("PUT BACK", 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, "PUT BACK"); }
-        else if (owned) button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_INK, MSP_DIM, "IN TANK", 2);
-        else if (can) { button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, "UNLOCK", 2);
-                        draw_text(&c, SHP_BTN_X + (SHP_BTN_W - text_w("UNLOCK", 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, "UNLOCK"); }
-        else           button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, 0x1c2f36, MSP_DIM, "UNLOCK", 2);
+        if (shelved) { button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, "放回", 2);          /* live: one tap returns it */
+                       draw_text(&c, SHP_BTN_X + (SHP_BTN_W - text_w("放回", 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, "放回"); }
+        else if (owned) button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_INK, MSP_DIM, "缸内", 2);
+        else if (can) { button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, "解锁", 2);
+                        draw_text(&c, SHP_BTN_X + (SHP_BTN_W - text_w("解锁", 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, "解锁"); }
+        else           button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, 0x1c2f36, MSP_DIM, "解锁", 2);
     }
     shop_foot(&c);                                            /* ?, the three areas, X (0.4.1) */
     if (g_shp_modal < 0 && !g_shp_earn) return;
@@ -9834,10 +10075,10 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
         const int Y = SHP_EARN_MODAL_Y, H = SHP_EARN_MODAL_H;
         rect_fill(&c, X, Y, W, H, 0x04141a);
         rect_edge(&c, X, Y, W, H, MSP_TEAL); rect_edge(&c, X + 1, Y + 1, W - 2, H - 2, 0x1c2f36);
-        draw_text(&c, X + (W - text_w("HOW TO EARN", 3)) / 2, Y + 14, 3, 0xffffff, "HOW TO EARN");
+        draw_text(&c, X + (W - text_w("如何获取", 3)) / 2, Y + 14, 3, 0xffffff, "如何获取");
         const char *const *lines = progression_sd_earn_lines();
         for (int i = 0; lines[i]; i++) draw_text(&c, X + 14, Y + 50 + i * 24, 2, MSP_TEAL, lines[i]);
-        draw_text(&c, X + (W - text_w("TAP TO CLOSE", 2)) / 2, Y + H - 24, 2, MSP_QUIET, "TAP TO CLOSE");
+        draw_text(&c, X + (W - text_w("轻点关闭", 2)) / 2, Y + H - 24, 2, MSP_QUIET, "轻点关闭");
         return;
     }
     if (g_shp_modal == SHP_MODAL_FRY) { shop_fry_modal(&c, t, fb, stride); return; }
@@ -9852,17 +10093,17 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
         draw_text(&c, X + (W - text_w(w1, 2)) / 2, Y + 118, 2, MSP_TEAL, w1);
         draw_text(&c, X + (W - text_w(w2, 2)) / 2, Y + 138, 2, MSP_TEAL, w2);
         const int bx = X + (W - MSP_HOW_W) / 2, by = Y + H - 12 - MSP_HOW_H;
-        if (now) draw_text(&c, X + (W - text_w("IN USE", 2)) / 2, by + 8, 2, MSP_TEAL, "IN USE");
-        else if (owned) { button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "USE", 2);
-                          draw_text(&c, bx + (MSP_HOW_W - text_w("USE", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "USE"); }
+        if (now) draw_text(&c, X + (W - text_w("使用中", 2)) / 2, by + 8, 2, MSP_TEAL, "使用中");
+        else if (owned) { button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "使用", 2);
+                          draw_text(&c, bx + (MSP_HOW_W - text_w("使用", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "使用"); }
         else {
-            char line[32]; snprintf(line, sizeof line, "%d", SD_PRICE_BG);
+            char line[96]; snprintf(line, sizeof line, "%d", SD_PRICE_BG);
             int pw = 20 + text_w(line, 2);
             price_tag(&c, X + (W - pw) / 2, Y + 164, SD_PRICE_BG, can ? 0xffffff : MSP_QUIET);
-            if (!can) { snprintf(line, sizeof line, "YOU HAVE %d", (int)t->sd_balance); draw_text(&c, X + (W - text_w(line, 2)) / 2, Y + 184, 2, MSP_QUIET, line); }
-            if (can) { button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "UNLOCK", 2);
-                       draw_text(&c, bx + (MSP_HOW_W - text_w("UNLOCK", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "UNLOCK"); }
-            else button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "UNLOCK", 2);
+            if (!can) { snprintf(line, sizeof line, "你有%d枚沙币", (int)t->sd_balance); draw_text(&c, X + (W - text_w(line, 2)) / 2, Y + 184, 2, MSP_QUIET, line); }
+            if (can) { button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "解锁", 2);
+                       draw_text(&c, bx + (MSP_HOW_W - text_w("解锁", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "解锁"); }
+            else button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "解锁", 2);
         }
         return;
     }
@@ -9879,25 +10120,25 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
     if (owned && tank_decor_placeable(g_shp_modal)) {         /* a placeable piece (0.3.9): in the tank MOVE | SHELVE; on the shelf PLACE | SELL (twice) */
         bool shelved = (t->sd_shelved & it->bit) != 0; char sub[28];
         if (shelved) shelf_slot(&c, X + (W - 64) / 2, Y + 14, t, g_shp_modal, 2);   /* over the icon: the piece as it is on the shelf */
-        const char *state = shelved ? "ON THE SHELF" : "IN THE TANK";
+        const char *state = shelved ? "已收纳" : "已放入鱼缸";
         draw_text(&c, X + (W - text_w(state, 2)) / 2, Y + 164, 2, MSP_TEAL, state);
         if (shelf_line(t, g_shp_modal, sub, sizeof sub)) draw_text(&c, X + (W - text_w(sub, 2)) / 2, Y + 184, 2, MSP_QUIET, sub);
-        button(&c, SHP_TWO_X0, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, shelved ? "PLACE" : "MOVE", 2);
-        if (!shelved) button(&c, SHP_TWO_X1, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "SHELVE", 2);
-        else if (g_shp_sell_armed) { snprintf(sub, sizeof sub, "+%d OK?", progression_sell_value(g_shp_modal));
+        button(&c, SHP_TWO_X0, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, shelved ? "放置" : "移动", 2);
+        if (!shelved) button(&c, SHP_TWO_X1, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "收纳", 2);
+        else if (g_shp_sell_armed) { snprintf(sub, sizeof sub, "换取%d枚？", progression_sell_value(g_shp_modal));
                                      button(&c, SHP_TWO_X1, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, sub, 2);
                                      draw_text(&c, SHP_TWO_X1 + (MSP_HOW_W - text_w(sub, 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, sub); }
-        else button(&c, SHP_TWO_X1, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "SELL", 2);
-    } else if (owned) draw_text(&c, X + (W - text_w("IN THE TANK", 2)) / 2, by + 8, 2, MSP_TEAL, "IN THE TANK");   /* the snail: a permanent resident */
+        else button(&c, SHP_TWO_X1, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "出售", 2);
+    } else if (owned) draw_text(&c, X + (W - text_w("已放入鱼缸", 2)) / 2, by + 8, 2, MSP_TEAL, "已放入鱼缸");   /* the snail: a permanent resident */
     else {
-        char line[32]; snprintf(line, sizeof line, "%d", it->price);
+        char line[96]; snprintf(line, sizeof line, "%d", it->price);
         int pw = 20 + text_w(line, 2);
         price_tag(&c, X + (W - pw) / 2, Y + 164, it->price, can ? 0xffffff : MSP_QUIET);
-        if (!can) { snprintf(line, sizeof line, "YOU HAVE %d", (int)t->sd_balance);
+        if (!can) { snprintf(line, sizeof line, "你有%d枚沙币", (int)t->sd_balance);
                     draw_text(&c, X + (W - text_w(line, 2)) / 2, Y + 184, 2, MSP_QUIET, line); }
-        if (can) { button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "UNLOCK", 2);
-                   draw_text(&c, bx + (MSP_HOW_W - text_w("UNLOCK", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "UNLOCK"); }
-        else button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "UNLOCK", 2);
+        if (can) { button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "解锁", 2);
+                   draw_text(&c, bx + (MSP_HOW_W - text_w("解锁", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "解锁"); }
+        else button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "解锁", 2);
     }
 }
 static int shp_tap(const tank_t *t, float x, float y);
@@ -10026,11 +10267,11 @@ void render_sd_toast(const tank_t *t, uint16_t *fb, int stride) {
  * end - Bananna on Discord, light sensitive: "even the 30% brightness can be
  * a bit bright"). */
 /* (the page's numbers, SET_*: render.h) */
-static const char *const SET_LIGHT[LIGHT_IDLE_N + 1] = { "DOUBLE-TAP",   /* MANUAL, the default: the row says how the light is worked */
-    "5 SEC", "15 SEC", "30 SEC", "1 MIN", "3 MIN", "5 MIN", "10 MIN", "30 MIN" };
-static const char *const SET_FEED[2]   = { "ON", "OFF" };          /* the default first */
+static const char *const SET_LIGHT[LIGHT_IDLE_N + 1] = { "双击",   /* MANUAL, the default: the row says how the light is worked */
+    "5秒", "15秒", "30秒", "1分钟", "3分钟", "5分钟", "10分钟", "30分钟" };
+static const char *const SET_FEED[2]   = { "开", "关" };          /* the default first */
 #if TANK_WORN
-static const char *const SET_SCREEN[2] = { "NORMAL", "TURNED" };   /* the default first */
+static const char *const SET_SCREEN[2] = { "正常", "翻转" };   /* the default first */
 #endif
 
 static void link_glyph(ctx_t *c, int x, int y, uint32_t rgb);   /* the link mode section, at the end */
@@ -10064,7 +10305,7 @@ static void set_slider(ctx_t *c, int row_y, const char *label, int lo, int pct) 
     rect_fill(c, SET_SEG_X + 4, cy - 3, kx - SET_SEG_X - 4, 6, MSP_TEAL);
     rect_fill(c, kx, cy - 3, SET_SEG_X + SET_SPAN_W - 4 - kx, 6, 0x1c2f36);
     rect_edge(c, kx, cy - 3, SET_SEG_X + SET_SPAN_W - 4 - kx, 6, MSP_DIM);
-    char txt[8]; snprintf(txt, sizeof txt, pct ? "%d%%" : "OFF", pct);
+    char txt[8]; snprintf(txt, sizeof txt, pct ? "%d%%" : "关", pct);
     bool off = pct == 0;
     button(c, kx - SET_KNOB_W / 2, y, SET_KNOB_W, SET_SEG_H, off ? 0x1c2f36 : MSP_TEAL, MSP_TEAL, "", 2);
     draw_text(c, kx - text_w(txt, 2) / 2, y + (SET_SEG_H - 14) / 2, 2, off ? MSP_TEAL : MSP_INK, txt);
@@ -10103,34 +10344,34 @@ static void set_lock_icon(ctx_t *c, int cx, int cy, bool locked, uint32_t rgb) {
 void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, int volume) {
     ctx_t c = ctx_page(fb, stride);
     rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
-    draw_text(&c, (PAGE_W - text_w("SETTINGS", 3)) / 2, SET_TITLE_Y, 3, 0xffffff, "SETTINGS");
-    set_slider(&c, SET_ROW1_Y, "BRIGHTNESS", SET_BRT_MIN, bright_pct);
-    set_slider(&c, SET_ROW2_Y, "VOLUME", 0, volume);
+    draw_text(&c, (PAGE_W - text_w("设置", 3)) / 2, SET_TITLE_Y, 3, 0xffffff, "设置");
+    set_slider(&c, SET_ROW1_Y, "亮度", SET_BRT_MIN, bright_pct);
+    set_slider(&c, SET_ROW2_Y, "音量", 0, volume);
     /* LIGHTS OUT: < the choice > */
     {
         int ch = tank_light_choice(t), y = SET_SEG_Y(SET_ROW3_Y);
         int bx = SET_SEG_X + SET_ARW_W + 4, bw = SET_SPAN_W - 2 * (SET_ARW_W + 4);
-        draw_text(&c, SET_LABEL_X, SET_ROW3_Y, 2, MSP_TEAL, "LIGHTS OUT");
+        draw_text(&c, SET_LABEL_X, SET_ROW3_Y, 2, MSP_TEAL, "关灯");
         set_arrow(&c, SET_SEG_X, y, false, ch > 0);
         button(&c, bx, y, bw, SET_SEG_H, MSP_TEAL, MSP_TEAL, "", 2);
         draw_text(&c, bx + (bw - text_w(SET_LIGHT[ch], 2)) / 2, y + (SET_SEG_H - 14) / 2, 2, MSP_INK, SET_LIGHT[ch]);
         set_arrow(&c, SET_SEG_X + SET_SPAN_W - SET_ARW_W, y, true, ch < LIGHT_IDLE_N);
     }
-    set_row(&c, SET_ROW4_Y, "AUTO FEED", SET_FEED, 2, t->autofeed_off ? 1 : 0);
+    set_row(&c, SET_ROW4_Y, "自动投食", SET_FEED, 2, t->autofeed_off ? 1 : 0);
 #if TANK_WORN
     /* SCREEN (2026-10-02): the way up of a watch worn either way round - TURNED
        for buttons toward the elbow. The picture turns as the finger lifts. */
-    set_row(&c, SET_ROW5_Y, "SCREEN", SET_SCREEN, 2, t->screen_turned ? 1 : 0);
-    draw_text(&c, SET_LABEL_X, SET_NOTE5_Y, 2, MSP_QUIET, "WORN THE OTHER WAY AROUND?");
+    set_row(&c, SET_ROW5_Y, "屏幕方向", SET_SCREEN, 2, t->screen_turned ? 1 : 0);
+    draw_text(&c, SET_LABEL_X, SET_NOTE5_Y, 2, MSP_QUIET, "需要翻转显示方向吗？");
 #else
     /* ROTATION (0.3.2): the picture turns over with the tank, unless locked */
     {
         int x = SET_SEG_X, y = SET_SEG_Y(SET_ROW5_Y);
-        draw_text(&c, SET_LABEL_X, SET_ROW5_Y, 2, MSP_TEAL, "ROTATION");
+        draw_text(&c, SET_LABEL_X, SET_ROW5_Y, 2, MSP_TEAL, "自动旋转");
         if (t->orient_lock) button(&c, x, y, SET_SEG_W, SET_SEG_H, MSP_TEAL, MSP_TEAL, "", 2);
         else                button(&c, x, y, SET_SEG_W, SET_SEG_H, 0x1c2f36, MSP_DIM, "", 2);
         set_lock_icon(&c, x + SET_SEG_W / 2, y + SET_SEG_H / 2 + 1, t->orient_lock, t->orient_lock ? MSP_INK : MSP_TEAL);
-        draw_text(&c, SET_ROT_WORD_X, SET_ROW5_Y, 2, t->orient_lock ? 0xffffff : MSP_QUIET, t->orient_lock ? "LOCKED" : "UNLOCKED");
+        draw_text(&c, SET_ROT_WORD_X, SET_ROW5_Y, 2, t->orient_lock ? 0xffffff : MSP_QUIET, t->orient_lock ? "已锁定" : "未锁定");
     }
 #endif
     /* the firmware version, hugging the bottom left of the frame (6 px up,
@@ -10141,20 +10382,20 @@ void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, 
        it", "make it 8px tall", "hug the bottom of the frame" (2026-09-16).
        The installer page shows the version it would write in the same words. */
     /* 2026-09-29: the release number first ("V0.2.0 ALPHA"), the build id after it */
-    char ver[64]; snprintf(ver, sizeof ver, "V%s %s  BUILD %s", PT_RELEASE, PT_RELEASE_STAGE, version_port_string());
+    char ver[64]; snprintf(ver, sizeof ver, "版本%s %s 构建%s", PT_RELEASE, ui_zh_label(PT_RELEASE_STAGE), version_port_string());
 #if TANK_WORN                                    /* the watch: centred under the foot, between the lower corners */
-    draw_text_8px(&c, (PAGE_W - ((int)strlen(ver) * 6 - 1)) / 2, SET_FOOT_Y + MSP_CLOSE_H + 2, MSP_DIM, ver);
+    draw_text_8px(&c, (PAGE_W - text_w(ver, 1)) / 2, SET_FOOT_Y + MSP_CLOSE_H + 2, MSP_DIM, ver);
 #else
     draw_text_8px(&c, SET_LABEL_X + (PAGE_BOWL ? 96 : 0), PAGE_H - 8 - 6, MSP_DIM, ver);
 #endif
-    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "CLOSE", 2);
+    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "关闭", 2);
     /* UPDATES (2026-09-30, docs/OTA.md): bottom left, the same size as CLOSE */
-    button(&c, SET_UPD_X, SET_FOOT_Y, SET_UPD_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "UPDATES", 2);
+    button(&c, SET_UPD_X, SET_FOOT_Y, SET_UPD_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "更新", 2);
     /* LINK (0.4, the tank link): the glyph - two tanks, a door between - and the word */
     button(&c, SET_LINK_X, SET_LINK_Y, SET_LINK_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "", 2);
-    { int gw = 20 + 8 + text_w("LINK", 2), gx = SET_LINK_X + (SET_LINK_W - gw) / 2;
+    { int gw = 20 + 8 + text_w("联机", 2), gx = SET_LINK_X + (SET_LINK_W - gw) / 2;
       link_glyph(&c, gx, SET_LINK_Y + (MSP_CLOSE_H - 12) / 2, 0xffffff);
-      draw_text(&c, gx + 28, SET_LINK_Y + (MSP_CLOSE_H - 14) / 2, 2, 0xffffff, "LINK"); }
+      draw_text(&c, gx + 28, SET_LINK_Y + (MSP_CLOSE_H - 14) / 2, 2, 0xffffff, "联机"); }
 }
 static int set_segment(float x, int n) {
     if (x < SET_SEG_X - 10) return -1;
@@ -10287,7 +10528,7 @@ static void link_glyph(ctx_t *c, int x, int y, uint32_t rgb) {
 #define LINK_DISC_W   156
 #define LINK_DISC_X   ((PAGE_W - LINK_DISC_W) / 2)
 #define LINK_DISC_Y   (LINK_DRIFT_Y + 122)
-static int link_dchip_w(void) { return 10 + text_w("DISCONNECT", 2) + 10; }
+static int link_dchip_w(void) { return 10 + text_w("断开连接", 2) + 10; }
 #ifdef TANK_ROUND          /* the bowl's top is a narrow cap: DISCONNECT gets its own row, centred under DONE and the badge */
 static int link_dchip_x(void) { return (TANK_W - link_dchip_w()) / 2; }
 static int link_dchip_y(void) { return TOOL_CHIP_Y + TOOL_CHIP_H + 10; }
@@ -10301,7 +10542,7 @@ static int link_tab_x(int e) {
     return e == LINK_LEFT ? (int)tank_glass_x0(y) + LINK_TAB_GAP : (int)tank_glass_x1(y) - LINK_TAB_GAP - LINK_TAB_W;
 }
 static int link_tab_y(void) { return (int)link_mid_y() - LINK_TAB_H / 2; }
-static int link_chip_w(void) { return 8 + 20 + 8 + text_w("DONE", 2) + 10; }
+static int link_chip_w(void) { return 8 + 20 + 8 + text_w("完成", 2) + 10; }
 
 static float g_link_hold[LINK_EDGES];
 static int   g_link_down = -1;                              /* what the finger went down on: an edge, 2 = DONE, -1 = nothing */
@@ -10358,7 +10599,7 @@ void render_link_mode(const link_view_t *v, uint16_t *fb, int stride, double tcl
     shade_box(&c, CX, CY, CW, CH);
     rect_edge(&c, CX, CY, CW, CH, 0xffffff); rect_edge(&c, CX + 1, CY + 1, CW - 2, CH - 2, 0x9fd8e2);
     link_glyph(&c, CX + 8, CY + (CH - 12) / 2, 0xffffff);
-    draw_text(&c, CX + 8 + 20 + 8, CY + (CH - 14) / 2, 2, 0xffffff, "DONE");
+    draw_text(&c, CX + 8 + 20 + 8, CY + (CH - 14) / 2, 2, 0xffffff, "完成");
     /* linked and nothing pending: DONE is the next step - say it with the chip
        itself (Strato 2026-10-05: "not at all intuitive that the user is supposed
        to hit DONE"): a pulsing second outline and an arrow under it, bobbing up
@@ -10374,7 +10615,7 @@ void render_link_mode(const link_view_t *v, uint16_t *fb, int stride, double tcl
         int a = 200 + (int)(55 * pulse);
         for (int y = CY + 2; y < CY + CH - 2; y++) for (int x = CX + 2; x < CX + CW - 2; x++) px_blend(&c, x, y, 0xe8fbff, a);
         link_glyph(&c, CX + 8, CY + (CH - 12) / 2, 0x04141a);
-        draw_text(&c, CX + 8 + 20 + 8, CY + (CH - 14) / 2, 2, 0x04141a, "DONE");
+        draw_text(&c, CX + 8 + 20 + 8, CY + (CH - 14) / 2, 2, 0x04141a, "完成");
         int ax = CX + CW / 2, ay = CY + CH + 10 + (int)(5 * (0.5f + 0.5f * sinf(clock * 4.0f)));
         for (int i = 0; i < 13; i++) for (int k = 0; k < 5; k++) {
             px_blend(&c, ax - 13 + i, ay + 13 - i + k, 0xffffff, 235);
@@ -10386,7 +10627,7 @@ void render_link_mode(const link_view_t *v, uint16_t *fb, int stride, double tcl
         int dx = link_dchip_x(), dy = link_dchip_y(), dw = link_dchip_w();
         shade_box(&c, dx, dy, dw, CH);
         rect_edge(&c, dx, dy, dw, CH, 0xffffff); rect_edge(&c, dx + 1, dy + 1, dw - 2, CH - 2, 0x9fd8e2);
-        draw_text(&c, dx + 10, dy + (CH - 14) / 2, 2, 0xffffff, "DISCONNECT");
+        draw_text(&c, dx + 10, dy + (CH - 14) / 2, 2, 0xffffff, "断开连接");
     }
     /* ours: the badge, top centre */
     { int bx = TANK_W / 2, by = CY + CH / 2;
@@ -10399,22 +10640,22 @@ void render_link_mode(const link_view_t *v, uint16_t *fb, int stride, double tcl
     bool two = v->edge[0].state == LV_TWO || v->edge[1].state == LV_TWO;
     bool ours = v->edge[0].state == LV_ARMED || v->edge[1].state == LV_ARMED;
     const char *l1, *l2;
-    if (two)               { l1 = "TWO TANKS ARE ASKING";         l2 = "ONLY ONE AT A TIME"; }
-    else if (asked)        { l1 = "A TANK IS ASKING";             l2 = "HOLD THE GLOWING ARROW"; }
-    else if (ours)         { l1 = "ASKING...";                    l2 = "HOLD THE OTHER TANK'S ARROW"; }
-    else if (open)         { l1 = "LINKED! THE DOOR IS OPEN";     l2 = "TAP DONE TO WATCH THEM SWIM"; }
-    else if (!v->n_near)   { l1 = "OPEN LINK ON THE OTHER TANK";  l2 = "AND PUT THEM SIDE BY SIDE"; }
-    else                   { l1 = "PUT THE TANKS SIDE BY SIDE";   l2 = "HOLD THE ARROWS THAT TOUCH"; }
+    if (two)               { l1 = "有两个鱼缸发来请求";         l2 = "每次连接一个鱼缸"; }
+    else if (asked)        { l1 = "有鱼缸请求连接";             l2 = "长按发光箭头"; }
+    else if (ours)         { l1 = "正在请求……";                    l2 = "请长按另一鱼缸的箭头"; }
+    else if (open)         { l1 = "已连接，通道开启";     l2 = "点击完成，观看鱼儿来往"; }
+    else if (!v->n_near)   { l1 = "在另一鱼缸打开联机";  l2 = "然后将两者并排放置"; }
+    else                   { l1 = "请将两个鱼缸并排放置";   l2 = "长按相邻的两个箭头"; }
     link_line(&c, LINK_HINT_Y, l1, 0xffffff);
     link_line(&c, LINK_HINT_Y + 22, l2, 0x9fd8e2);
     /* NEARBY: every tank in link mode that is heard */
     { const int py = LINK_HINT_Y + 46, r = 7;
-      int w = text_w("NEARBY", 2) + 10 + (v->n_near ? v->n_near * (2 * r + 8) : text_w("NONE YET", 2));
+      int w = text_w("附近", 2) + 10 + (v->n_near ? v->n_near * (2 * r + 8) : text_w("暂无", 2));
       int x = PAGE_X + (PAGE_W - w) / 2, y = PAGE_Y + py;
       for (int yy = y - 4; yy < y + 18; yy++) for (int xx = x - 8; xx < x + w + 8; xx++) px_blend(&c, xx, yy, 0x04141a, 170);
-      draw_text(&c, x, y, 2, 0x9fd8e2, "NEARBY");
-      x += text_w("NEARBY", 2) + 10;
-      if (!v->n_near) draw_text(&c, x, y, 2, 0x8fb4ba, "NONE YET");
+      draw_text(&c, x, y, 2, 0x9fd8e2, "附近");
+      x += text_w("附近", 2) + 10;
+      if (!v->n_near) draw_text(&c, x, y, 2, 0x8fb4ba, "暂无");
       for (int i = 0; i < v->n_near; i++) link_badge_draw(&c, x + r + i * (2 * r + 8), y + 7, r, v->near_badge[i], 255); }
 }
 int render_link_touch(const link_view_t *v, float x, float y, bool down, float dt) {
@@ -10480,15 +10721,15 @@ void render_link_drift(const link_view_t *v, uint16_t *fb, int stride, double cl
     const int W = 336, H = 164, X = PAGE_X + (PAGE_W - W) / 2, Y = PAGE_Y + LINK_DRIFT_Y;
     shade_box(&c, X, Y, W, H);
     rect_edge(&c, X, Y, W, H, 0xffffff); rect_edge(&c, X + 1, Y + 1, W - 2, H - 2, 0x9fd8e2);
-    static const char *const GRACE[4] = { "THE TANKS DRIFTED", "PUT THEM BACK SIDE BY SIDE", "AND KEEP THEM STILL", "OR THE FISH WILL SWIM HOME" };
-    static const char *const HOME[4]  = { "THE TANKS DRIFTED", "THE FISH ARE SWIMMING HOME", "THEN THE DOOR CLOSES", "" };   /* past the grace */
+    static const char *const GRACE[4] = { "鱼缸位置发生变化", "请重新并排放好", "并保持静止", "否则鱼儿将游回家" };
+    static const char *const HOME[4]  = { "鱼缸位置发生变化", "鱼儿正在回家", "随后通道关闭", "" };   /* past the grace */
     const char *const *L = v->drift_homeward ? HOME : GRACE;
     for (int i = 0; i < 4; i++) draw_text(&c, X + (W - text_w(L[i], 2)) / 2, Y + 12 + i * 22, 2, i ? 0x9fd8e2 : 0xffffff, L[i]);
     float left = v->drift_ms_left / (float)(v->drift_homeward ? LINK_HOMEWARD_MS : LINK_DRIFT_GRACE_MS); left = left < 0 ? 0 : left > 1 ? 1 : left;
     rect_edge(&c, X + 24, Y + 104, W - 48, 8, 0x3f6a72);
     rect_fill(&c, X + 26, Y + 106, (int)((W - 52) * left), 4, 0xffffff);
     /* DISCONNECT (Strato, 2026-10-05: "an easy way to unlink"): every door of this tank shuts now */
-    button(&c, PAGE_X + LINK_DISC_X, PAGE_Y + LINK_DISC_Y, LINK_DISC_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "DISCONNECT", 2);
+    button(&c, PAGE_X + LINK_DISC_X, PAGE_Y + LINK_DISC_Y, LINK_DISC_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "断开连接", 2);
 }
 /* the DRIFTED notice's DISCONNECT answers a tap only where the notice is seen (the 11-02 sweep: its hit ran under every
    page and card - a neighbor lifting their tank and a tap mid-page closed every door and ate the tap): no page up, and no
@@ -10544,7 +10785,7 @@ static void swap_button(ctx_t *c, int x, int y, int w, int h, float t) {
     uint32_t fill = sh_mix(MSP_TEAL, 0xf2fbfc, (int)(a * 200));
     button(c, x, y, w, h, fill, fill, "", 2);
     rect_edge(c, x - 3, y - 3, w + 6, h + 6, sh_mix(0x0a2a36, 0xf2fbfc, (int)(a * 220)));   /* (a halo that breathes with it) */
-    draw_text(c, x + (w - text_w("SWAPPING", 2)) / 2, y + (h - 14) / 2, 2, MSP_INK, "SWAPPING");
+    draw_text(c, x + (w - text_w("正在切换", 2)) / 2, y + (h - 14) / 2, 2, MSP_INK, "正在切换");
 }
 /* the whole frame at light/256 of its light (the swap's fade to dark) */
 void render_fade(uint16_t *fb, int stride, int light) {
@@ -10564,34 +10805,34 @@ void render_advanced(uint16_t *fb, int stride, int pick_mah, int pick_ma, int se
     ctx_t c = ctx_page(fb, stride);
     char txt[40];
     rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
-    text_centre(&c, SET_TITLE_Y, 3, 0xffffff, "ADVANCED");
-    draw_text_8px(&c, (PAGE_W - (13 * 6 - 1)) / 2, SET_TITLE_Y + 25, MSP_QUIET, "FOR GROWN-UPS");
+    text_centre(&c, SET_TITLE_Y, 3, 0xffffff, "高级设置");
+    draw_text_8px(&c, (PAGE_W - text_w("请谨慎调整", 1)) / 2, SET_TITLE_Y + 25, MSP_QUIET, "请谨慎调整");
     /* TOUCH */
-    draw_text(&c, SET_LABEL_X, SET_ROW1_Y, 2, MSP_TEAL, "TOUCH");
-    button(&c, SET_SEG_X, SET_SEG_Y(SET_ROW1_Y), SET_SPAN_W, SET_SEG_H, 0x1c2f36, MSP_TEAL, "CALIBRATE", 2);
-    draw_text(&c, SET_LABEL_X, SET_SEG_Y(SET_ROW1_Y) + SET_SEG_H + 10, 2, MSP_QUIET, "TAPS MISSING THEIR MARK?");
+    draw_text(&c, SET_LABEL_X, SET_ROW1_Y, 2, MSP_TEAL, "触摸");
+    button(&c, SET_SEG_X, SET_SEG_Y(SET_ROW1_Y), SET_SPAN_W, SET_SEG_H, 0x1c2f36, MSP_TEAL, "校准", 2);
+    draw_text(&c, SET_LABEL_X, SET_SEG_Y(SET_ROW1_Y) + SET_SEG_H + 10, 2, MSP_QUIET, "点击位置不准确？");
     /* BATTERY: < 800 MAH > */
     int y = SET_SEG_Y(ADV_BAT_ROW);
     int bx = SET_SEG_X + SET_ARW_W + 4, bw = SET_SPAN_W - 2 * (SET_ARW_W + 4);
     const int *sz; int n = adv_cell_sizes(&sz);
-    draw_text(&c, SET_LABEL_X, ADV_BAT_ROW, 2, MSP_TEAL, "BATTERY");
+    draw_text(&c, SET_LABEL_X, ADV_BAT_ROW, 2, MSP_TEAL, "电池");
     set_arrow(&c, SET_SEG_X, y, false, pick_mah > sz[0]);
     button(&c, bx, y, bw, SET_SEG_H, MSP_TEAL, MSP_TEAL, "", 2);
-    snprintf(txt, sizeof txt, "%d MAH", pick_mah);
+    snprintf(txt, sizeof txt, "%d毫安时", pick_mah);
     int tw = text_w(txt, 2), sx = bx + (bw - tw - (fast ? 22 : 0)) / 2;
     if (fast) adv_warn_sign(&c, sx + 8, y + (SET_SEG_H - 15) / 2, 17, MSP_INK);   /* faster than the board's own: the sign rides along */
     draw_text(&c, sx + (fast ? 22 : 0), y + (SET_SEG_H - 14) / 2, 2, MSP_INK, txt);
     set_arrow(&c, SET_SEG_X + SET_SPAN_W - SET_ARW_W, y, true, pick_mah < sz[n - 1]);
-    if (stock) snprintf(txt, sizeof txt, "STANDARD - CHARGES AT %d MA", pick_ma);
-    else       snprintf(txt, sizeof txt, "CHARGES AT %d MA", pick_ma);
+    if (stock) snprintf(txt, sizeof txt, "标准配置，充电电流%d毫安", pick_ma);
+    else       snprintf(txt, sizeof txt, "充电电流%d毫安", pick_ma);
     draw_text(&c, SET_LABEL_X, y + SET_SEG_H + 10, 2, MSP_QUIET, txt);
     if (pick_mah != set_mah) {                    /* a size picked, not in use yet: SET applies it (the warning first, when it is faster) */
-        snprintf(txt, sizeof txt, "SET %d MAH", pick_mah);
+        snprintf(txt, sizeof txt, "设为%d毫安时", pick_mah);
         lit_button(&c, SET_SEG_X, ADV_SET_Y, SET_SPAN_W, ADV_SET_H, txt);
-        snprintf(txt, sizeof txt, "NOW %d MAH", set_mah);
+        snprintf(txt, sizeof txt, "当前%d毫安时", set_mah);
         draw_text(&c, SET_LABEL_X, ADV_SET_Y + (ADV_SET_H - 14) / 2, 2, MSP_QUIET, txt);
-    } else draw_text(&c, SET_LABEL_X, y + SET_SEG_H + 32, 2, MSP_QUIET, "MATCH THE SIZE ON YOUR BATTERY");
-    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "BACK", 2);
+    } else draw_text(&c, SET_LABEL_X, y + SET_SEG_H + 32, 2, MSP_QUIET, "请按电池标注容量设置");
+    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "返回", 2);
 }
 int render_advanced_tap(float x, float y) {
     x -= PAGE_X; y -= PAGE_Y;
@@ -10612,20 +10853,20 @@ void render_battery_warning(uint16_t *fb, int stride, int cell_mah, int charge_m
     char txt[48];
     rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
     {   /* the sign and the word, one group, centred */
-        int sw = 36, gap = 12, tw = text_w("WARNING", 3), x0 = (PAGE_W - sw - gap - tw) / 2;
+        int sw = 36, gap = 12, tw = text_w("注意", 3), x0 = (PAGE_W - sw - gap - tw) / 2;
         adv_warn_sign(&c, x0 + sw / 2, SET_TITLE_Y - 6, sw, ADV_WARN_RGB);
-        draw_text(&c, x0 + sw + gap, SET_TITLE_Y, 3, 0xffffff, "WARNING");
+        draw_text(&c, x0 + sw + gap, SET_TITLE_Y, 3, 0xffffff, "注意");
     }
     int y = SET_TITLE_Y + 42;
-    text_centre(&c, y, 2, 0xffffff, "ONLY FOR A BIGGER BATTERY."); y += 30;
-    snprintf(txt, sizeof txt, "THE TANK WILL CHARGE AT %d MA.", charge_ma);
+    text_centre(&c, y, 2, 0xffffff, "仅适用于更大容量电池"); y += 30;
+    snprintf(txt, sizeof txt, "充电电流将达到%d毫安", charge_ma);
     text_centre(&c, y, 2, MSP_TEAL, txt); y += 22;
-    text_centre(&c, y, 2, MSP_TEAL, "A SMALLER BATTERY CHARGED THIS"); y += 22;
-    text_centre(&c, y, 2, MSP_TEAL, "FAST CAN GET HOT, SWELL UP"); y += 22;
-    text_centre(&c, y, 2, MSP_TEAL, "OR CATCH FIRE."); y += 30;
-    text_centre(&c, y, 2, 0xffffff, "READ THE SIZE PRINTED ON IT.");
+    text_centre(&c, y, 2, MSP_TEAL, "小容量电池以此电流充电"); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "可能发热、鼓包"); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "甚至起火"); y += 30;
+    text_centre(&c, y, 2, 0xffffff, "请核对电池标注容量");
     {   /* the box: [x]  MY BATTERY IS 800 MAH / OR BIGGER */
-        snprintf(txt, sizeof txt, "MY BATTERY IS %d MAH", cell_mah);
+        snprintf(txt, sizeof txt, "我的电池为%d毫安时", cell_mah);
         int bs = ADV_WARN_BOX, gap = 14, tw = text_w(txt, 2), x0 = (PAGE_W - bs - gap - tw) / 2, by = ADV_WARN_BOX_Y;
         rect_fill(&c, x0, by, bs, bs, checked ? MSP_TEAL : 0x1c2f36);
         rect_edge(&c, x0, by, bs, bs, MSP_TEAL); rect_edge(&c, x0 + 1, by + 1, bs - 2, bs - 2, MSP_TEAL);
@@ -10635,13 +10876,13 @@ void render_battery_warning(uint16_t *fb, int stride, int cell_mah, int charge_m
                 rect_fill(&c, px, py - 1, 2, 4, MSP_INK);
             }
         draw_text(&c, x0 + bs + gap, by, 2, 0xffffff, txt);
-        draw_text(&c, x0 + bs + gap, by + 20, 2, 0xffffff, "OR BIGGER");
+        draw_text(&c, x0 + bs + gap, by + 20, 2, 0xffffff, "或更大容量");
     }
-    button(&c, SET_UPD_X, SET_FOOT_Y, SET_UPD_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "CANCEL", 2);
-    if (checked) lit_button(&c, ADV_CONT_X, SET_FOOT_Y, ADV_CONT_W, MSP_CLOSE_H, "CONTINUE");
+    button(&c, SET_UPD_X, SET_FOOT_Y, SET_UPD_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "取消", 2);
+    if (checked) lit_button(&c, ADV_CONT_X, SET_FOOT_Y, ADV_CONT_W, MSP_CLOSE_H, "继续");
     else {
         rect_edge(&c, ADV_CONT_X, SET_FOOT_Y, ADV_CONT_W, MSP_CLOSE_H, MSP_DIM);
-        draw_text(&c, ADV_CONT_X + (ADV_CONT_W - text_w("CONTINUE", 2)) / 2, SET_FOOT_Y + (MSP_CLOSE_H - 14) / 2, 2, MSP_DIM, "CONTINUE");
+        draw_text(&c, ADV_CONT_X + (ADV_CONT_W - text_w("继续", 2)) / 2, SET_FOOT_Y + (MSP_CLOSE_H - 14) / 2, 2, MSP_DIM, "继续");
     }
 }
 int render_battery_warning_tap(float x, float y) {
@@ -10658,16 +10899,16 @@ int render_battery_warning_tap(float x, float y) {
 void render_touch_intro(uint16_t *fb, int stride, bool own_in_use, const char *msg) {
     ctx_t c = ctx_page(fb, stride);
     rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
-    text_centre(&c, SET_TITLE_Y, 3, 0xffffff, "TOUCH");
+    text_centre(&c, SET_TITLE_Y, 3, 0xffffff, "触摸");
     int y = SET_TITLE_Y + 46;
-    text_centre(&c, y, 2, MSP_TEAL, "HOLD THE TANK THE WAY"); y += 22;
-    text_centre(&c, y, 2, MSP_TEAL, "YOU USUALLY DO."); y += 34;
-    text_centre(&c, y, 2, MSP_TEAL, "NINE CROSSES COME UP."); y += 22;
-    text_centre(&c, y, 2, MSP_TEAL, "TAP THE MIDDLE OF EACH ONE.");
-    lit_button(&c, (PAGE_W - ADV_START_W) / 2, ADV_START_Y, ADV_START_W, SET_SEG_H, "START");
-    if (own_in_use) button(&c, (PAGE_W - ADV_RESET_W) / 2, ADV_RESET_Y, ADV_RESET_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "RESET TOUCH", 2);
+    text_centre(&c, y, 2, MSP_TEAL, "请以平时的姿势"); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "握住鱼缸"); y += 34;
+    text_centre(&c, y, 2, MSP_TEAL, "屏幕将依次显示九个十字"); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "请点击每个十字中心");
+    lit_button(&c, (PAGE_W - ADV_START_W) / 2, ADV_START_Y, ADV_START_W, SET_SEG_H, "开始");
+    if (own_in_use) button(&c, (PAGE_W - ADV_RESET_W) / 2, ADV_RESET_Y, ADV_RESET_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "恢复触摸配置", 2);
     if (msg) text_centre(&c, ADV_RESET_Y + MSP_CLOSE_H + 10, 2, 0xffffff, msg);
-    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "BACK", 2);
+    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "返回", 2);
 }
 int render_touch_intro_tap(float x, float y, bool own_in_use) {
     x -= PAGE_X; y -= PAGE_Y;
@@ -10686,7 +10927,7 @@ void render_touch_cross(uint16_t *fb, int stride, int i, int n, int tx, int ty) 
     char txt[32];
     rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
     touch_cross(&c, tx, ty, MSP_TEAL);
-    snprintf(txt, sizeof txt, "TAP THE CROSS  %d OF %d", i + 1, n);
+    snprintf(txt, sizeof txt, "点击十字 %d/%d", i + 1, n);
     text_centre(&c, ty - PAGE_Y < PAGE_H / 2 ? PAGE_H - 60 : 46, 2, 0xffffff, txt);
 }
 void render_touch_check(uint16_t *fb, int stride, int tx, int ty, float secs_left, float secs_total) {
@@ -10695,10 +10936,10 @@ void render_touch_check(uint16_t *fb, int stride, int tx, int ty, float secs_lef
     rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
     touch_cross(&c, tx, ty, MSP_TEAL);
     int y = ty - PAGE_Y < PAGE_H / 2 ? PAGE_H - 96 : 30;
-    text_centre(&c, y, 2, 0xffffff, "TAP THIS CROSS TO KEEP"); y += 22;
-    text_centre(&c, y, 2, 0xffffff, "THE NEW TOUCH"); y += 28;
+    text_centre(&c, y, 2, 0xffffff, "点击这个十字"); y += 22;
+    text_centre(&c, y, 2, 0xffffff, "保存新的校准"); y += 28;
     int s = (int)ceilf(secs_left < 0 ? 0 : secs_left);
-    snprintf(txt, sizeof txt, "THE OLD ONE COMES BACK IN %d", s);
+    snprintf(txt, sizeof txt, "%d秒后恢复原校准", s);
     text_centre(&c, y, 2, MSP_QUIET, txt); y += 24;
     int bw = 240, bx = (PAGE_W - bw) / 2;                    /* the time left, a bar that shrinks */
     float f = secs_total > 0 ? secs_left / secs_total : 0; if (f < 0) f = 0;
@@ -10771,7 +11012,7 @@ void render_touch_check(uint16_t *fb, int stride, int tx, int ty, float secs_lef
 #define SH_BRASS    0xd2b878
 static ctx_t ctx_frame(uint16_t *fb, int stride) {
     CTX_MADE();
-    ctx_t c = { fb, stride, 1.0f, 0, 0, TANK_W, TANK_H };
+    ctx_t c = { fb, stride, 1.0f, 0, 0, TANK_W, TANK_H, NULL, 0, 0 };
     g_dirty_hold = true;
     return c;
 }
@@ -10853,18 +11094,23 @@ static void sh_flask(ctx_t *c, int x, int y, uint32_t rgb) {   /* 7 x 8: EXPERIM
 /* a name plate: scale 2 letters (0.3.9.3, Strato: the 6 px ones were "barely visible"), on two lines when the name is
    wider than its tank's share of the shelf - broken at the space nearest the middle, or where the line is full */
 static void sh_plate(ctx_t *c, int cx, int y, const char *name) {
-    const int maxw = SH_TW + SH_GAP - 8, fit = (maxw + 2) / 12;    /* (a plate keeps 4 px from the next - seven letters on every glass; letters a line holds) */
-    char l1[16] = "", l2[16] = "";
-    int n = (int)strlen(name); if (n > 15) n = 15;
+    const int maxw = SH_TW + SH_GAP - 8;
+    char translated[32], l1[32] = "", l2[32] = "";
+    ui_zh_tank_name(translated, sizeof translated, name);
+    name = translated;
     const char *nl = strchr(name, '\n');
-    if (nl) { int a = (int)(nl - name); memcpy(l1, name, (size_t)(a < 15 ? a : 15)); snprintf(l2, sizeof l2, "%s", nl + 1); }   /* (the keeper's two lines) */
-    else if (text_w(name, 2) <= maxw) memcpy(l1, name, (size_t)n);
-    else {
-        int cut = -1;                                      /* at a space, the nearest the middle that leaves both lines whole */
-        for (int i = 1; i < n; i++) if (name[i] == ' ' && i <= fit && n - i - 1 <= fit && (cut < 0 || abs(i - n / 2) < abs(cut - n / 2))) cut = i;
-        if (cut > 0) { memcpy(l1, name, (size_t)cut); memcpy(l2, name + cut + 1, (size_t)(n - cut - 1)); }
-        else { int k = (n + 1) / 2; if (k > fit) k = fit; memcpy(l1, name, (size_t)k); memcpy(l2, name + k, (size_t)(n - k > fit ? fit : n - k)); }   /* (one long word: halves) */
+    size_t cut = ui_text_fit_bytes(name, maxw, 2, sizeof l1 - 1);
+    if (nl && (size_t)(nl - name) <= cut) cut = (size_t)(nl - name);
+    else if (name[cut]) {
+        for (size_t i = cut; i > 0; i--) {
+            if (name[i] == ' ') { cut = i; break; }
+        }
     }
+    memcpy(l1, name, cut);
+    const char *rest = name + cut;
+    while (*rest == ' ' || *rest == '\n') rest++;
+    size_t second = ui_text_fit_bytes(rest, maxw, 2, sizeof l2 - 1);
+    memcpy(l2, rest, second);
     int tw = text_w(l1, 2) > text_w(l2, 2) ? text_w(l1, 2) : text_w(l2, 2);
     int w = tw + 4, h = l2[0] ? 34 : 18;
     if (w < 30) w = 30;
@@ -10872,7 +11118,7 @@ static void sh_plate(ctx_t *c, int cx, int y, const char *name) {
     rect_fill(c, x, y, w, h, SH_BRASS);
     rect_edge(c, x, y, w, h, 0x7a6435);
     draw_text(c, x + 2 + (tw - text_w(l1, 2)) / 2, y + 2, 2, 0x2c2412, l1);
-    if (l2[0]) draw_text(c, x + 2 + (tw - text_w(l2, 2)) / 2, y + 18, 2, 0x2c2412, l2);   /* (2 px between the lines - Strato: they touched) */
+    if (l2[0]) draw_text(c, x + 2 + (tw - text_w(l2, 2)) / 2, y + 18, 2, 0x2c2412, l2);
 }
 static void sh_pic(ctx_t *c, int x, int y, const uint16_t *pic, int w, int h, bool dim) {
     for (int j = 0; j < h; j++)
@@ -10927,7 +11173,7 @@ static void sh_arrow(ctx_t *c, int x, int y, bool right, bool live) {
 }
 static void sh_pager(ctx_t *c, int cx, int y, int page, int pages) {
     char t[16];
-    snprintf(t, sizeof t, "%d OF %d", page, pages);
+    snprintf(t, sizeof t, "%d/%d", page, pages);
     int tw = text_w(t, 2);
     sh_arrow(c, cx - tw / 2 - 12 - SH_ARW_W, y, false, page > 1);
     draw_text(c, cx - tw / 2, y + (MSP_CLOSE_H - 14) / 2, 2, pages > 1 ? 0xffffff : MSP_QUIET, t);
@@ -10958,22 +11204,32 @@ static void sh_footer(ctx_t *c, const char *left, bool left_sd, int wallet, cons
 
 void render_shelf_thumb_size(int *w, int *h) { *w = SH_PIC_W; *h = SH_IH; }
 void render_shelf_thumb(const uint16_t *frame, uint16_t *thumb) {
+#ifdef TANK_SZPI
+    const int frame_w = 320, frame_h = 240;                 /* the LCD's visible pixel grid */
+#else
+    const int frame_w = TANK_W, frame_h = TANK_H;
+#endif
     int cw, ch;                                            /* the crop: the picture's shape from the frame's middle */
 #if PAGE_BOWL
     ch = 340;                                              /* the square inside the circle, a little over */
 #else
-    ch = TANK_H;
+    ch = frame_h;
 #endif
     cw = ch * SH_PIC_W / SH_IH;
-    if (cw > TANK_W) { cw = TANK_W; ch = cw * SH_IH / SH_PIC_W; }
-    int ox = (TANK_W - cw) / 2, oy = (TANK_H - ch) / 2;
+    if (cw > frame_w) { cw = frame_w; ch = cw * SH_IH / SH_PIC_W; }
+    int ox = (frame_w - cw) / 2, oy = (frame_h - ch) / 2;
     for (int j = 0; j < SH_IH; j++)
         for (int i = 0; i < SH_PIC_W; i++) {               /* a box filter over the source pixels each one covers */
             int x0 = ox + i * cw / SH_PIC_W, x1 = ox + (i + 1) * cw / SH_PIC_W, y0 = oy + j * ch / SH_IH, y1 = oy + (j + 1) * ch / SH_IH;
             int r = 0, g = 0, b = 0, n = 0;
             for (int y = y0; y < y1; y++)
                 for (int x = x0; x < x1; x++) {
+#ifdef TANK_SZPI
+                    /* Native text and fish occupy precisely these backing-buffer samples. */
+                    uint16_t v = FB_SWAP16(frame[(y * 3 / 2) * TANK_W + x * 3 / 2]);
+#else
                     uint16_t v = FB_SWAP16(frame[y * TANK_W + x]);
+#endif
                     r += v >> 11; g += (v >> 5) & 63; b += v & 31; n++;
                 }
             thumb[j * SH_PIC_W + i] = n ? (uint16_t)((r / n) << 11 | (g / n) << 5 | (b / n)) : 0;
@@ -11002,7 +11258,7 @@ static void sh_lock_btn(ctx_t *c, int x, int y, bool locked) {
 }
 static void sh_lock_xy(int *x, int *y) {                   /* by the title: at the shelves' right edge, or beside the title on the round glass and the watch */
 #if PAGE_BOWL || defined(TANK_WATCH)
-    *x = (TANK_W - text_w("MY TANKS", 3) - 14 - SH_LOCK_W) / 2 + text_w("MY TANKS", 3) + 14;   /* (the title and the button centered as one group) */
+    *x = (TANK_W - text_w("我的鱼缸", 3) - 14 - SH_LOCK_W) / 2 + text_w("我的鱼缸", 3) + 14;   /* (the title and the button centered as one group) */
 #else
     *x = SH_X0 + SH_ROW_W - SH_LOCK_W;
 #endif
@@ -11010,7 +11266,7 @@ static void sh_lock_xy(int *x, int *y) {                   /* by the title: at t
 }
 void render_touch_lock_hint(uint16_t *fb, int stride) {    /* a tap on a locked tank: what happened and the way back */
     ctx_t c = ctx_frame(fb, stride);
-    const char *l1 = "TOUCH IS LOCKED", *l2 = "PRESS BOOT TWICE TO UNLOCK";
+    const char *l1 = "触摸已锁定", *l2 = "连按两次BOOT即可解锁";
     int tw = text_w(l1, 2) > text_w(l2, 1) ? text_w(l1, 2) : text_w(l2, 1);
     int w = 14 + 16 + 12 + tw + 14, h = 46, x = (TANK_W - w) / 2, y = TANK_H * 62 / 100;
     for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) px_blend(&c, x + i, y + j, 0x0b0f12, 225);
@@ -11024,7 +11280,7 @@ void render_touch_lock_hint(uint16_t *fb, int stride) {    /* a tap on a locked 
  * title says which, the empty places light as places to put it (a tank's place trades with it), CANCEL bottom left */
 static bool g_sh_moving; static int g_sh_move = -1; static char g_sh_move_name[24];
 void render_shelf_set_move(bool on, int i, const char *name) {
-    g_sh_moving = on; g_sh_move = i; snprintf(g_sh_move_name, sizeof g_sh_move_name, "%s", name ? name : "");
+    g_sh_moving = on; g_sh_move = i; ui_zh_tank_name(g_sh_move_name, sizeof g_sh_move_name, name);
     for (char *p = g_sh_move_name; *p; p++) if (*p == '\n') *p = ' ';
 }
 static int sh_slot_x(int i) { return SH_X0 + (i & 3) * (SH_TW + SH_GAP); }
@@ -11034,13 +11290,13 @@ void render_shelf(uint16_t *fb, int stride, const shelf_slot_t slot[8], int page
     sh_wall(&c);
     const bool moving = g_sh_moving;
     if (moving) {                                          /* MOVE: the title names the tank in hand */
-        char t[32]; snprintf(t, sizeof t, "MOVE %s", g_sh_move_name);
+        char t[32]; snprintf(t, sizeof t, "移动%s", g_sh_move_name);
         draw_text(&c, (TANK_W - text_w(t, 2)) / 2, SH_TITLE_Y + 4, 2, 0xffffff, t);
     } else {
 #if PAGE_BOWL || defined(TANK_WATCH)
-    draw_text(&c, (TANK_W - text_w("MY TANKS", 3) - 14 - SH_LOCK_W) / 2, SH_TITLE_Y, 3, 0xffffff, "MY TANKS");   /* (beside the padlock) */
+    draw_text(&c, (TANK_W - text_w("我的鱼缸", 3) - 14 - SH_LOCK_W) / 2, SH_TITLE_Y, 3, 0xffffff, "我的鱼缸");   /* (beside the padlock) */
 #else
-    draw_text(&c, (TANK_W - text_w("MY TANKS", 3)) / 2, SH_TITLE_Y, 3, 0xffffff, "MY TANKS");
+    draw_text(&c, (TANK_W - text_w("我的鱼缸", 3)) / 2, SH_TITLE_Y, 3, 0xffffff, "我的鱼缸");
 #endif
     }
     for (int row = 0; row < 2; row++)
@@ -11070,9 +11326,9 @@ void render_shelf(uint16_t *fb, int stride, const shelf_slot_t slot[8], int page
                 }
         sh_tank(&c, x, y, SH_TW, SH_IH, s->thumb, !now);
         if (now) {                                         /* the NOW tag over the lid (scale 2, 0.3.9.3) */
-            int w = text_w("NOW", 2) + 12, tx = x + (SH_TW - w) / 2, ty = y - 20;
+            int w = text_w("现在", 2) + 12, tx = x + (SH_TW - w) / 2, ty = y - 20;
             rect_fill(&c, tx, ty, w, 18, MSP_TEAL);
-            draw_text(&c, tx + 6, ty + 2, 2, MSP_INK, "NOW");
+            draw_text(&c, tx + 6, ty + 2, 2, MSP_INK, "现在");
         } else sh_rest_sign(&c, x + SH_TW - 13, y + SH_LID + 12, s->state);
         if (now && g_sh_touch_lock) {                      /* the locked glass: the padlock where the others wear their rest signs */
             int cx = x + SH_TW - 13, cy = y + SH_LID + 12;
@@ -11088,7 +11344,7 @@ void render_shelf(uint16_t *fb, int stride, const shelf_slot_t slot[8], int page
         }
         sh_plate(&c, x + SH_TW / 2, face + 1, s->name);
     }
-    sh_footer(&c, moving ? "CANCEL" : "LIBRARY", false, 0, moving ? "" : "CLOSE", page, pages);
+    sh_footer(&c, moving ? "取消" : "鱼缸库", false, 0, moving ? "" : "关闭", page, pages);
     if (!moving) { int lx, ly; sh_lock_xy(&lx, &ly); sh_lock_btn(&c, lx, ly, g_sh_touch_lock); }
 }
 
@@ -11284,7 +11540,7 @@ void render_shelf_rename(uint16_t *fb, int stride, const shelf_slot_t *s, const 
             for (int x = 0; x < TANK_W; x++) px565_blend(&c, x, y, 0, 244);   /* (near black: the shelves only a hint behind) */
     }
     if (!(part & 2)) return;
-    draw_text(&c, (TANK_W - text_w("RENAME THIS TANK", 2)) / 2, NK_PLATE_Y - 26, 2, 0xffffff, "RENAME THIS TANK");
+    draw_text(&c, (TANK_W - text_w("给鱼缸改名", 2)) / 2, NK_PLATE_Y - 26, 2, 0xffffff, "给鱼缸改名");
     rect_fill(&c, NK_PX0, NK_PLATE_Y, NK_PW, NK_PH, SH_BRASS); rect_edge(&c, NK_PX0, NK_PLATE_Y, NK_PW, NK_PH, 0x7a6435);
     for (int k = 0; k < 2; k++) {
         int ty = NK_PLATE_Y + 9 + k * (NK_LH + 12), tx = NK_PX0 + 12;
@@ -11295,18 +11551,18 @@ void render_shelf_rename(uint16_t *fb, int stride, const shelf_slot_t *s, const 
             if (n < SHR_N && ((int)(clock * 2) & 1)) rect_fill(&c, tx + n * NK_GW, ty - 2, NK_S, NK_LH + 4, 0x2c2412);   /* the bar */
         }
     }
-    { int x, y, w, h; nk_box(SHK_CLEAR, &x, &y, &w, &h); button(&c, x, y, w, h, 0x1c2f36, MSP_TEAL, "CLEAR", 2); }
+    { int x, y, w, h; nk_box(SHK_CLEAR, &x, &y, &w, &h); button(&c, x, y, w, h, 0x1c2f36, MSP_TEAL, "清空", 2); }
     for (int cell = 0; cell < 14; cell++) {
         int x, y, w, h; nk_box(SHK_CHAR0 + cell, &x, &y, &w, &h);
         char lbl[2] = { NK_PAGES[r->page][cell], 0 };
         rect_fill(&c, x, y, w, h, 0x16262c); rect_edge(&c, x, y, w, h, 0x3d5d66);
         draw_text(&c, x + (w - text_w(lbl, 3)) / 2, y + (h - 21) / 2, 3, 0xffffff, lbl);
     }
-    static const struct { int key; const char *lbl; } FK[6] = { { SHK_MORE, "MORE" }, { SHK_DEL, "DEL" }, { SHK_SPACE, "SPACE" }, { SHK_LINE, "LINE" }, { SHK_BACK, "BACK" }, { SHK_DONE, "DONE" } };
+    static const struct { int key; const char *lbl; } FK[6] = { { SHK_MORE, "详情" }, { SHK_DEL, "删除" }, { SHK_SPACE, "空格" }, { SHK_LINE, "换行" }, { SHK_BACK, "返回" }, { SHK_DONE, "完成" } };
     for (int f = 0; f < 6; f++) {
         int x, y, w, h; nk_fn_box(FK[f].key, &x, &y, &w, &h);
-        if (FK[f].key == SHK_DONE) lit_button(&c, x, y, w, h, "DONE");
-        else if (FK[f].key == SHK_BACK) button(&c, x, y, w, h, 0x16262c, 0x3d5d66, "BACK", 2);   /* (it leaves the page: quieter) */
+        if (FK[f].key == SHK_DONE) lit_button(&c, x, y, w, h, "完成");
+        else if (FK[f].key == SHK_BACK) button(&c, x, y, w, h, 0x16262c, 0x3d5d66, "返回", 2);   /* (it leaves the page: quieter) */
         else button(&c, x, y, w, h, 0x1c2f36, MSP_TEAL, FK[f].lbl, 2);
         if (FK[f].key == SHK_SPACE) rect_fill(&c, x + 10, y + h / 2 + 10, w - 20, 3, MSP_TEAL);   /* the space bar's bar */
         if (FK[f].key == SHK_MORE) for (int i = 0; i < 3; i++) rect_fill(&c, x + w / 2 - 10 + i * 8, y + h - 10, 4, 4, i == r->page ? MSP_TEAL : 0x3d5d66);   /* which page */
@@ -11326,45 +11582,45 @@ void render_shelf_card(uint16_t *fb, int stride, const shelf_slot_t *s, const ch
     sh_tank(&c, mx + 16, my + 16, SH_TW, SH_IH, s->thumb, false);
     int tx = mx + 16 + SH_TW + 14, ty = my + 18;
     char t[48];
-    { char nm[24]; snprintf(nm, sizeof nm, "%s", s->name); for (char *p = nm; *p; p++) if (*p == '\n') *p = ' ';   /* (its two lines as one) */
+    { char nm[24]; ui_zh_tank_name(nm, sizeof nm, s->name); for (char *p = nm; *p; p++) if (*p == '\n') *p = ' ';   /* (its two lines as one) */
       draw_text(&c, tx, ty, 2, 0xffffff, nm); ty += 24; }                /* (every line scale 2 since 0.3.9.3: the 6 px ones read as specks) */
     draw_text(&c, tx, ty, 2, MSP_TEAL, kind); ty += 18;
-    if (s->experimental) { sh_flask(&c, tx, ty + 2, MSP_QUIET); draw_text(&c, tx + 10, ty, 2, MSP_QUIET, "EXPERIMENTAL"); ty += 18; }
+    if (s->experimental) { sh_flask(&c, tx, ty + 2, MSP_QUIET); draw_text(&c, tx + 10, ty, 2, MSP_QUIET, "实验功能"); ty += 18; }
     const bool glass = s->state == SHELF_NOW;              /* the tank on the glass (0.3.9.3): its name and RENAME, nothing to swap or rest */
     g_shc_glass = glass;
-    if (glass) snprintf(t, sizeof t, "ON THE GLASS"); else snprintf(t, sizeof t, "SHELVED %d DAY%s", shelf_days, shelf_days == 1 ? "" : "S");
+    if (glass) snprintf(t, sizeof t, "当前鱼缸"); else snprintf(t, sizeof t, "已收纳%d天%s", shelf_days, shelf_days == 1 ? "" : "");
     draw_text(&c, tx, ty, 2, MSP_TEAL, t); ty += 18;
-    if (age_days >= 0) { snprintf(t, sizeof t, "%d DAYS OLD", age_days); draw_text(&c, tx, ty, 2, MSP_TEAL, t); }
+    if (age_days >= 0) { snprintf(t, sizeof t, "已生活%d天", age_days); draw_text(&c, tx, ty, 2, MSP_TEAL, t); }
     int y = my + 16 + top + 14;                            /* TIME: DORMANT | PAUSED */
     if (glass) {                                           /* (in its place: what the shelf does with it) */
-        const char *l1 = "SWAP IN ANOTHER TANK", *l2 = "TO PUT THIS ONE AWAY";
+        const char *l1 = "先切换到另一个鱼缸", *l2 = "即可收纳当前鱼缸";
         draw_text(&c, mx + (SHC_W - text_w(l1, 2)) / 2, y + 4, 2, MSP_QUIET, l1);
         draw_text(&c, mx + (SHC_W - text_w(l2, 2)) / 2, y + 24, 2, MSP_QUIET, l2);
         y += SHC_SEG_H + SHC_NOTE;
-        button(&c, mx + (SHC_W - 98) / 2, y, 98, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "RENAME", 2);
+        button(&c, mx + (SHC_W - 98) / 2, y, 98, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "改名", 2);
         return;
     }
-    draw_text(&c, mx + 16, y + (SHC_SEG_H - 14) / 2, 2, MSP_TEAL, "TIME");
-    int sx = mx + 16 + text_w("TIME", 2) + 14, sw = mx + SHC_W - 16 - sx, half = sw / 2;
+    draw_text(&c, mx + 16, y + (SHC_SEG_H - 14) / 2, 2, MSP_TEAL, "时间");
+    int sx = mx + 16 + text_w("时间", 2) + 14, sw = mx + SHC_W - 16 - sx, half = sw / 2;
     bool paused = s->state == SHELF_PAUSED;
     for (int k = 0; k < 2; k++) {
         bool on = (k == 1) == paused;
-        const char *lab = k ? "PAUSED" : "DORMANT";
+        const char *lab = k ? "暂停" : "休眠";
         int bx = sx + k * half, bw = k ? sw - half : half;
         if (on) { rect_fill(&c, bx, y, bw, SHC_SEG_H, MSP_TEAL); }
         else { rect_fill(&c, bx, y, bw, SHC_SEG_H, 0x1c2f36); rect_edge(&c, bx, y, bw, SHC_SEG_H, MSP_TEAL); }
         draw_text(&c, bx + (bw - text_w(lab, 2)) / 2, y + (SHC_SEG_H - 14) / 2, 2, on ? MSP_INK : MSP_QUIET, lab);
     }
     y += SHC_SEG_H + 9;
-    const char *note = paused ? "WAITS AS YOU LEFT IT" : "LIVES ON, AS IF ASLEEP";
+    const char *note = paused ? "保持离开时的状态" : "如同睡眠般继续生活";
     draw_text(&c, mx + (SHC_W - text_w(note, 2)) / 2, y, 2, MSP_QUIET, note);
     y += SHC_NOTE - 9;
     int bw0 = 120, bw1 = 98, bw2 = 74, gap = (SHC_W - 32 - bw0 - bw1 - bw2) / 2, bx = mx + 16;
     if (g_shc_swap >= 0) swap_button(&c, bx, y, bw0, MSP_CLOSE_H, g_shc_swap);   /* SWAP IN tapped: it answers at once */
-    else lit_button(&c, bx, y, bw0, MSP_CLOSE_H, "SWAP IN");
+    else lit_button(&c, bx, y, bw0, MSP_CLOSE_H, "切换");
     bx += bw0 + gap;
-    button(&c, bx, y, bw1, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "RENAME", 2); bx += bw1 + gap;
-    button(&c, bx, y, bw2, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "MORE", 2);
+    button(&c, bx, y, bw1, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "改名", 2); bx += bw1 + gap;
+    button(&c, bx, y, bw2, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "详情", 2);
 }
 
 /* MORE on a tank's card: REMOVE (0.3.9.3, art approved by Strato; D5). The card again, its picture and name, and what
@@ -11400,23 +11656,23 @@ void render_shelf_remove(uint16_t *fb, int stride, const shelf_slot_t *s, int re
     rect_edge(&c, mx, my, SHC_W, h, MSP_TEAL); rect_edge(&c, mx + 1, my + 1, SHC_W - 2, h - 2, MSP_TEAL);
     sh_tank(&c, mx + 16, my + 16, SH_TW, SH_IH, s->thumb, true);
     int tx = mx + 16 + SH_TW + 14, ty = my + 18;
-    char nm[24]; snprintf(nm, sizeof nm, "%s", s->name); for (char *p = nm; *p; p++) if (*p == '\n') *p = ' ';
-    draw_text(&c, tx, ty, 2, 0xffffff, "REMOVE"); ty += 22;
+    char nm[24]; ui_zh_tank_name(nm, sizeof nm, s->name); for (char *p = nm; *p; p++) if (*p == '\n') *p = ' ';
+    draw_text(&c, tx, ty, 2, 0xffffff, "移除"); ty += 22;
     draw_text(&c, tx, ty, 2, 0xffffff, nm); ty += 22;
-    draw_text(&c, tx, ty, 2, MSP_TEAL, "FROM THE SHELF?");
+    draw_text(&c, tx, ty, 2, MSP_TEAL, "从收藏架中移除？");
     /* what the refund is for (0.4.1, audit P6): only what this tank has, singular or plural - "+20 FOR ITS PIECES",
        "+60 FOR ITS PIECES" / "AND CRITTERS", "+90 FOR ITS PIECES," / "CRITTERS AND BACKGROUNDS"; nothing bought: PIECES,
        as before. <= 24 characters a line at scale 2 */
-    static const char *const KN[3][2] = { { "PIECE", "PIECES" }, { "CRITTER", "CRITTERS" }, { "BACKGROUND", "BACKGROUNDS" } };
+    static const char *const KN[3][2] = { { "装饰", "装饰" }, { "小生物", "小生物" }, { "背景", "背景" } };
     const char *w3[3]; int m = 0;
     for (int k = 0; k < 3; k++) if (n && n[k] > 0) w3[m++] = KN[k][n[k] > 1];
     char t[40], t2[40] = "";
-    if (m == 0) snprintf(t, sizeof t, "+%d FOR ITS PIECES", refund);
-    else if (m == 1) snprintf(t, sizeof t, "+%d FOR ITS %s", refund, w3[0]);
-    else if (m == 2) { snprintf(t, sizeof t, "+%d FOR ITS %s", refund, w3[0]); snprintf(t2, sizeof t2, "AND %s", w3[1]); }
-    else { snprintf(t, sizeof t, "+%d FOR ITS %s,", refund, w3[0]); snprintf(t2, sizeof t2, "%s AND %s", w3[1], w3[2]); }
+    if (m == 0) snprintf(t, sizeof t, "装饰返还%d枚", refund);
+    else if (m == 1) snprintf(t, sizeof t, "返还%d枚，来自%s", refund, w3[0]);
+    else if (m == 2) { snprintf(t, sizeof t, "返还%d枚，来自%s", refund, w3[0]); snprintf(t2, sizeof t2, "和%s", w3[1]); }
+    else { snprintf(t, sizeof t, "返还%d枚，来自%s", refund, w3[0]); snprintf(t2, sizeof t2, "%s和%s", w3[1], w3[2]); }
     int y = my + 16 + top + 14 + (t2[0] ? 0 : 10);             /* (one refund line: the three centered in the four) */
-    const char *l1 = "THIS TANK AND ITS FISH", *l2 = "ARE GONE FOR GOOD.";
+    const char *l1 = "这个鱼缸和其中的鱼儿", *l2 = "将被永久移除";
     draw_text(&c, mx + (SHC_W - text_w(l1, 2)) / 2, y, 2, 0xffffff, l1); y += 20;
     draw_text(&c, mx + (SHC_W - text_w(l2, 2)) / 2, y, 2, 0xffffff, l2); y += 20;
     int w = 16 + 6 + text_w(t, 2), x = mx + (SHC_W - w) / 2;
@@ -11425,12 +11681,12 @@ void render_shelf_remove(uint16_t *fb, int stride, const shelf_slot_t *s, int re
     if (t2[0]) draw_text(&c, mx + (SHC_W - text_w(t2, 2)) / 2, y + 20, 2, MSP_TEAL, t2);
     int bmx, bmy, rx, rw; shm_btns(&bmx, &bmy, &y, &rx, &rw);
     const int bw = SHM_BW;
-    button(&c, mx + 16, y, bw, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "BACK", 2);
+    button(&c, mx + 16, y, bw, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "返回", 2);
     rect_fill(&c, rx, y, rw, MSP_CLOSE_H, 0x1c2f36);
     int fw = (int)(rw * (hold < 0 ? 0 : hold > 1 ? 1 : hold));
     if (fw > 0) rect_fill(&c, rx, y, fw, MSP_CLOSE_H, 0x2f7f8a);   /* the hold, filling (a deep teal: the white words read on both) */
     rect_edge(&c, rx, y, rw, MSP_CLOSE_H, MSP_TEAL);
-    const char *lb = "HOLD TO SELL";   /* (Strato: "hold to sell") */
+    const char *lb = "长按确认出售";   /* (Strato: "hold to sell") */
     draw_text(&c, rx + (rw - text_w(lb, 2)) / 2, y + (MSP_CLOSE_H - 14) / 2, 2, 0xffffff, lb);
 }
 
@@ -11462,9 +11718,9 @@ void render_loading(uint16_t *fb, int stride, const char *name, double clock, co
         }
         if (age == 0) rect_fill(&c, bx - 4, by - 4, 2, 2, 0xffffff);         /* (its glint) */
     }
-    char nm[24]; snprintf(nm, sizeof nm, "%s", name ? name : ""); for (char *p = nm; *p; p++) if (*p == '\n') *p = ' ';
+    char nm[24]; ui_zh_tank_name(nm, sizeof nm, name); for (char *p = nm; *p; p++) if (*p == '\n') *p = ' ';
     draw_text(&c, (TANK_W - text_w(nm, 2)) / 2, cy + R + 26, 2, 0xffffff, nm);
-    if (!line) line = "FILLING THE TANK";
+    if (!line) line = "正在准备鱼缸";
     draw_text(&c, (TANK_W - text_w(line, 2)) / 2, cy + R + 48, 2, MSP_TEAL, line);
 }
 
@@ -11473,7 +11729,7 @@ int render_shelf_card_tap(float x, float y) {
     int top = SH_BOX_H > SHC_TOP ? SH_BOX_H : SHC_TOP, h = 16 + top + 14 + SHC_SEG_H + SHC_NOTE + MSP_CLOSE_H + 16;
     int mx = (TANK_W - SHC_W) / 2, my = (TANK_H - h) / 2, s = 6;
     if (x < mx || x >= mx + SHC_W || y < my || y >= my + h) return SHC_TAP_OUTSIDE;
-    int sy = my + 16 + top + 14, sx = mx + 16 + text_w("TIME", 2) + 14, sw = mx + SHC_W - 16 - sx;
+    int sy = my + 16 + top + 14, sx = mx + 16 + text_w("时间", 2) + 14, sw = mx + SHC_W - 16 - sx;
     if (g_shc_glass) {                                     /* the tank on the glass: RENAME alone */
         int by = sy + SHC_SEG_H + SHC_NOTE, bx = mx + (SHC_W - 98) / 2;
         return y >= by - s && y < by + MSP_CLOSE_H + s && x >= bx - s && x < bx + 98 + s ? SHC_TAP_RENAME : SHC_TAP_NONE;
@@ -11496,23 +11752,34 @@ int render_shelf_card_tap(float x, float y) {
  * shelves bottom right; LAST CHECKED under the title (the list works with
  * no Wi-Fi). */
 static int sh_wrap(ctx_t *c, int x, int y, int maxw, int pitch, int max_lines, uint32_t rgb, const char *s) {
-    char line[64]; int n = 0, lines = 0, maxc = maxw / 6;
-    if (maxc > 63) maxc = 63;
+    char line[128];
+    int lines = 0;
     while (*s && lines < max_lines) {
-        const char *w = s; while (*w == ' ') w++;
-        const char *e = w; while (*e && *e != ' ') e++;
-        int wl = (int)(e - w);
-        if (n && n + 1 + wl > maxc) { line[n] = 0; draw_text(c, x, y, 1, rgb, line); y += pitch; lines++; n = 0; continue; }
-        if (n) line[n++] = ' ';
-        memcpy(line + n, w, (size_t)wl); n += wl; s = e;
+        while (*s == ' ') s++;
+        if (!*s) break;
+        size_t cut = ui_text_fit_bytes(s, maxw, 1, sizeof line - 1);
+        const char *nl = strchr(s, '\n');
+        if (nl && (size_t)(nl - s) <= cut) cut = (size_t)(nl - s);
+        else if (s[cut] && (unsigned char)s[cut] < 0x80) {
+            for (size_t i = cut; i > 0; i--) {
+                if (s[i] == ' ') { cut = i; break; }
+            }
+        }
+        if (!cut && *s != '\n') break;
+        memcpy(line, s, cut);
+        line[cut] = 0;
+        draw_text(c, x, y, 1, rgb, line);
+        y += pitch;
+        lines++;
+        s += cut;
+        if (*s == '\n') s++;
     }
-    if (n && lines < max_lines) { line[n] = 0; draw_text(c, x, y, 1, rgb, line); lines++; }
     return lines;
 }
 void render_library(uint16_t *fb, int stride, const library_row_t *row, int n, int wallet, const char *checked) {
     ctx_t c = ctx_frame(fb, stride);
     rect_fill(&c, 0, 0, TANK_W, TANK_H, MSP_INK);
-    draw_text(&c, (TANK_W - text_w("THE LIBRARY", 3)) / 2, SH_TITLE_Y, 3, 0xffffff, "THE LIBRARY");
+    draw_text(&c, (TANK_W - text_w("鱼缸库", 3)) / 2, SH_TITLE_Y, 3, 0xffffff, "鱼缸库");
     draw_text(&c, (TANK_W - text_w(checked, 1)) / 2, SH_TITLE_Y + 27, 1, MSP_QUIET, checked);
     int x0 = SH_LIB_X0, x1 = TANK_W - SH_LIB_X0, bw = 116;
     int y = SH_TITLE_Y + 46, pitch = SH_BOX_H + 22;
@@ -11521,12 +11788,12 @@ void render_library(uint16_t *fb, int stride, const library_row_t *row, int n, i
         sh_tank(&c, x0, y, SH_TW, SH_IH, r->thumb, false);
         int tx = x0 + SH_TW + 12, tw = x1 - bw - 10 - tx;
         draw_text(&c, tx, y + 2, 2, 0xffffff, r->name);
-        int ln = sh_wrap(&c, tx, y + 24, tw, 11, (SH_BOX_H - 38) / 11, MSP_TEAL, r->line);   /* as many lines as the picture is tall */
-        int tagy = y + 24 + ln * 11 + 6;
-        if (r->experimental) { sh_flask(&c, tx, tagy - 1, MSP_QUIET); draw_text(&c, tx + 10, tagy, 1, MSP_QUIET, "EXPERIMENTAL"); }
-        else if (r->installed) draw_text(&c, tx, tagy, 1, MSP_QUIET, "INSTALLED");
+        int ln = sh_wrap(&c, tx, y + 24, tw, 14, (SH_BOX_H - 38) / 14, MSP_TEAL, r->line);   /* as many lines as the picture is tall */
+        int tagy = y + 24 + ln * 14 + 6;
+        if (r->experimental) { sh_flask(&c, tx, tagy - 1, MSP_QUIET); draw_text(&c, tx + 10, tagy, 1, MSP_QUIET, "实验功能"); }
+        else if (r->installed) draw_text(&c, tx, tagy, 1, MSP_QUIET, "已安装");
         int bx = x1 - bw, by = y + 10;
-        const char *act = r->installed ? "NEW TANK" : "GET";
+        const char *act = r->installed ? "新鱼缸" : "获取";
         if (r->price > wallet) {                           /* not enough yet: an outline with dim words (fill, not hue) */
             rect_edge(&c, bx, by, bw, MSP_CLOSE_H, MSP_DIM);
             draw_text(&c, bx + (bw - text_w(act, 2)) / 2, by + (MSP_CLOSE_H - 14) / 2, 2, MSP_DIM, act);
@@ -11536,10 +11803,10 @@ void render_library(uint16_t *fb, int stride, const library_row_t *row, int n, i
             int w = 16 + 5 + text_w(t, 2), px0 = bx + (bw - w) / 2;
             blit_icon(&c, px0, by + MSP_CLOSE_H + 8, &icon_shop_sand_dollar_16, 255);
             draw_text(&c, px0 + 21, by + MSP_CLOSE_H + 9, 2, 0xffffff, t);
-        } else draw_text(&c, bx + (bw - text_w("FREE", 2)) / 2, by + MSP_CLOSE_H + 9, 2, 0xffffff, "FREE");
+        } else draw_text(&c, bx + (bw - text_w("免费", 2)) / 2, by + MSP_CLOSE_H + 9, 2, 0xffffff, "免费");
         if (i + 1 < n) rect_fill(&c, x0, y + pitch - 11, x1 - x0, 1, MSP_DIM);
     }
-    sh_footer(&c, NULL, true, wallet, "BACK", 1, 1);
+    sh_footer(&c, NULL, true, wallet, "返回", 1, 1);
 }
 int render_library_tap(float x, float y, int n) {
     int r = render_shelf_tap(x, y);                        /* the footer is the shelf's: BACK stands where CLOSE does */

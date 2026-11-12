@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* setup.c — first-run setup flow (see setup.h). */
 #include "collection.h"
 #include "setup.h"
@@ -92,27 +93,27 @@ static bool born_next_door(const fish_t *f) { return (f->ms_bits & MS_CROSSBRED)
 void setup_born_lines(const tank_t *t, int fish, char *l1, size_t n1, const char **l2) {
     const fish_t *f = &t->fish[fish];
     bool shop = from_shop(f);                                         /* bought (0.3.5): no parents, in at the surface */
-    if (shop) snprintf(l1, n1, "FROM THE SHOP,");
-    else snprintf(l1, n1, "BORN TO %s AND %s", parent_of(t, f, 0).name, parent_of(t, f, 1).name);
-    *l2 = shop ? "IN AT THE SURFACE." : born_next_door(f) ? "NEXT DOOR." : "DOWN IN THE GRASS.";
+    if (shop) snprintf(l1, n1, "来自商店");
+    else snprintf(l1, n1, "双亲为%s和%s", parent_of(t, f, 0).name, parent_of(t, f, 1).name);
+    *l2 = shop ? "从水面游入" : born_next_door(f) ? "来自邻居" : "诞生于水草间";
 }
 const char *setup_from_name(const tank_t *t, int fish, int g) {
     const fish_t *f = &t->fish[fish];
-    if (f->mutated == g + 1) return "NEW!";
-    if (from_shop(f)) return "THE SHOP";                              /* (0.4.1: was "?" on every row) */
+    if (f->mutated == g + 1) return "新成员！";
+    if (from_shop(f)) return "商店";                              /* (0.4.1: was "?" on every row) */
     return parent_of(t, f, (f->from_b >> g & 1) ? 1 : 0).name;
 }
 /* a mutation in words for the announcement (0.4): "SOMETHING NEW: SAIL FINS";
    false = none */
 static bool mutation_words(const fish_t *f, char *out, size_t n) {
     if (!f->mutated || f->mutated > GENE_N) return false;
-    static const char *const PAT[PATTERN_N] = { "BARS", "A MASK", "AN EYE BAND", "NO MARKINGS" };
+    static const char *const PAT[PATTERN_N] = { "条纹", "面罩", "眼带", "纯色" };
     switch (f->mutated - 1) {
-    case GENE_SHAPE:   snprintf(out, n, "SOMETHING NEW: A %s BODY", SHAPE_NAMES[f->shape]); break;
-    case GENE_FINS:    snprintf(out, n, "SOMETHING NEW: %s FINS", FINS_NAMES[f->fins]); break;
-    case GENE_PATTERN: snprintf(out, n, "SOMETHING NEW: %s", PAT[f->pattern < PATTERN_N ? f->pattern : 0]); break;
-    case GENE_BODY:    snprintf(out, n, "SOMETHING NEW: ITS BODY COLOR"); break;
-    default:           snprintf(out, n, "SOMETHING NEW: ITS MARKINGS"); break;
+    case GENE_SHAPE:   snprintf(out, n, "新体型：%s", ui_zh_label(SHAPE_NAMES[f->shape])); break;
+    case GENE_FINS:    snprintf(out, n, "新鱼鳍：%s", ui_zh_label(FINS_NAMES[f->fins])); break;
+    case GENE_PATTERN: snprintf(out, n, "新特征：%s", PAT[f->pattern < PATTERN_N ? f->pattern : 0]); break;
+    case GENE_BODY:    snprintf(out, n, "新的身体颜色"); break;
+    default:           snprintf(out, n, "新的花纹"); break;
     }
     return true;
 }
@@ -264,29 +265,29 @@ static void kbd_key(fish_t *f, int k) {
 
 const char *setup_hit_name(int id) {
     static char buf[12];
-    if (id == SETUP_HIT_NEXT) return "NEXT";
-    if (id == SETUP_HIT_BACK) return "BACK";
-    if (id == SETUP_HIT_SELL) return "SELL";
-    if (id == SETUP_HIT_ROLL) return "ROLL";
-    if (id == SETUP_HIT_SWAP) return "SWAP";
+    if (id == SETUP_HIT_NEXT) return "下一步";
+    if (id == SETUP_HIT_BACK) return "返回";
+    if (id == SETUP_HIT_SELL) return "出售";
+    if (id == SETUP_HIT_ROLL) return "随机";
+    if (id == SETUP_HIT_SWAP) return "换色";
     if (id >= SETUP_HIT_ACC0 && id < SETUP_HIT_ACC0 + LOOK_N) { snprintf(buf, sizeof buf, "markings %d", id - SETUP_HIT_ACC0); return buf; }
-    if (id >= SETUP_HIT_SHAPE0 && id < SETUP_HIT_SHAPE0 + SHAPE_N) return SHAPE_NAMES[id - SETUP_HIT_SHAPE0];
-    if (id >= SETUP_HIT_FINS0 && id < SETUP_HIT_FINS0 + FINS_N) return FINS_NAMES[id - SETUP_HIT_FINS0];
-    if (id >= SETUP_HIT_PAT0 && id < SETUP_HIT_PAT0 + PATTERN_N) return PATTERN_NAMES[id - SETUP_HIT_PAT0];
-    if (id == SETUP_HIT_SHELVE) return "SHELVE";
-    if (id == SETUP_HIT_LOCK) return "LOCK";
-    if (id == SETUP_HIT_BCK) return "SEND BACK";
-    if (id == SETUP_HIT_FWD) return "BRING FORWARD";
+    if (id >= SETUP_HIT_SHAPE0 && id < SETUP_HIT_SHAPE0 + SHAPE_N) return ui_zh_label(SHAPE_NAMES[id - SETUP_HIT_SHAPE0]);
+    if (id >= SETUP_HIT_FINS0 && id < SETUP_HIT_FINS0 + FINS_N) return ui_zh_label(FINS_NAMES[id - SETUP_HIT_FINS0]);
+    if (id >= SETUP_HIT_PAT0 && id < SETUP_HIT_PAT0 + PATTERN_N) return ui_zh_label(PATTERN_NAMES[id - SETUP_HIT_PAT0]);
+    if (id == SETUP_HIT_SHELVE) return "收纳";
+    if (id == SETUP_HIT_LOCK) return "锁定";
+    if (id == SETUP_HIT_BCK) return "移至后方";
+    if (id == SETUP_HIT_FWD) return "移至前方";
     if (id == SETUP_HIT_ORD0) return "BEHIND (the order squares)";
     if (id == SETUP_HIT_ORD0 + 1) return "IN FRONT (the order squares)";
     if (id == SETUP_HIT_UP)   return "up";
     if (id == SETUP_HIT_DOWN) return "down";
     if (id >= SETUP_HIT_SLOT0 && id < SETUP_HIT_SLOT0 + FISH_NAME_MAX) { snprintf(buf, sizeof buf, "slot %d", id - SETUP_HIT_SLOT0); return buf; }
-    if (id == SETUP_HIT_KEY0 + SETUP_KEY_DEL) return "DEL";
+    if (id == SETUP_HIT_KEY0 + SETUP_KEY_DEL) return "删除";
     if (id == SETUP_HIT_KEY0 + SETUP_KEY_PAGE) return "page flip";
     if (id >= SETUP_HIT_KEY0 && id < SETUP_HIT_KEY0 + 26) { snprintf(buf, sizeof buf, "key %c", 'A' + id - SETUP_HIT_KEY0); return buf; }
     if (id >= SETUP_HIT_BODY0 && id < SETUP_HIT_BODY0 + LOOK_N) { snprintf(buf, sizeof buf, "body %d", id - SETUP_HIT_BODY0); return buf; }
-    if (id >= SETUP_HIT_Z0 && id < SETUP_HIT_Z0 + DECOR_Z_N) return id == SETUP_HIT_Z0 ? "BEHIND" : id == SETUP_HIT_Z0 + 1 ? "AMONG" : "IN FRONT";
+    if (id >= SETUP_HIT_Z0 && id < SETUP_HIT_Z0 + DECOR_Z_N) return id == SETUP_HIT_Z0 ? "后方" : id == SETUP_HIT_Z0 + 1 ? "中间" : "前方";
     return "nothing";
 }
 
@@ -363,13 +364,13 @@ static void swap_button(uint16_t *fb, int stride) {
 /* the editor's rows (setup.h, THE EDITOR): where each sits and what a pick is */
 typedef struct { int y, h, x, px, w, n, hit0, gene; const char *label; } edit_row_t;
 static const edit_row_t FORM_ROWS[] = {
-    { SETUP_FORM_SHAPE_Y, SETUP_FORM_TILE_H, SETUP_TILE_X, SETUP_TILE_PX, SETUP_TILE_W, SHAPE_N, SETUP_HIT_SHAPE0, GENE_SHAPE, "SHAPE" },
-    { SETUP_FORM_FINS_Y,  SETUP_FORM_TILE_H, SETUP_TILE_X, SETUP_TILE_PX, SETUP_TILE_W, FINS_N,  SETUP_HIT_FINS0,  GENE_FINS,  "FINS" },
+    { SETUP_FORM_SHAPE_Y, SETUP_FORM_TILE_H, SETUP_TILE_X, SETUP_TILE_PX, SETUP_TILE_W, SHAPE_N, SETUP_HIT_SHAPE0, GENE_SHAPE, "体型" },
+    { SETUP_FORM_FINS_Y,  SETUP_FORM_TILE_H, SETUP_TILE_X, SETUP_TILE_PX, SETUP_TILE_W, FINS_N,  SETUP_HIT_FINS0,  GENE_FINS,  "鱼鳍" },
 };
 static const edit_row_t COLOR_ROWS[] = {
-    { SETUP_COLOR_BODY_Y, SETUP_COLOR_SW_H,  SETUP_SW_X,   SETUP_SW_PX,   SETUP_SW_W,   LOOK_N,    SETUP_HIT_BODY0, GENE_BODY,    "BODY" },
-    { SETUP_COLOR_PAT_Y,  SETUP_COLOR_PAT_H, SETUP_PAT_TILE_X, SETUP_PAT_TILE_PX, SETUP_PAT_TILE_W, PATTERN_TILES, SETUP_HIT_PAT0, GENE_PATTERN, "PATTERN" },
-    { SETUP_COLOR_ACC_Y,  SETUP_COLOR_SW_H,  SETUP_SW_X,   SETUP_SW_PX,   SETUP_SW_W,   LOOK_N,    SETUP_HIT_ACC0,  GENE_ACCENT,  "MARKINGS" },
+    { SETUP_COLOR_BODY_Y, SETUP_COLOR_SW_H,  SETUP_SW_X,   SETUP_SW_PX,   SETUP_SW_W,   LOOK_N,    SETUP_HIT_BODY0, GENE_BODY,    "身体" },
+    { SETUP_COLOR_PAT_Y,  SETUP_COLOR_PAT_H, SETUP_PAT_TILE_X, SETUP_PAT_TILE_PX, SETUP_PAT_TILE_W, PATTERN_TILES, SETUP_HIT_PAT0, GENE_PATTERN, "图案" },
+    { SETUP_COLOR_ACC_Y,  SETUP_COLOR_SW_H,  SETUP_SW_X,   SETUP_SW_PX,   SETUP_SW_W,   LOOK_N,    SETUP_HIT_ACC0,  GENE_ACCENT,  "花纹" },
 };
 static int edit_rows(const edit_row_t **r) {
     if (page_is_form()) { *r = FORM_ROWS; return (int)(sizeof FORM_ROWS / sizeof *FORM_ROWS); }
@@ -630,7 +631,7 @@ static void lines_c(uint16_t *fb, int stride, int y, int pitch, uint32_t rgb, co
 }
 static void nav(uint16_t *fb, int stride, bool top, const char *next_label, bool go) {
     int y = top ? SETUP_TOP_BTN_Y : SETUP_BTN_Y, w = top ? SETUP_TOP_BTN_W : SETUP_BTN_W;
-    render_button(fb, stride, top ? SETUP_TOP_BACK_X : SETUP_BACK_X, y, w, SETUP_BTN_H, C_KEY, C_DIM, s_rename ? "CANCEL" : "BACK", 2);
+    render_button(fb, stride, top ? SETUP_TOP_BACK_X : SETUP_BACK_X, y, w, SETUP_BTN_H, C_KEY, C_DIM, s_rename ? "取消" : "返回", 2);
     render_button(fb, stride, top ? SETUP_TOP_NEXT_X : SETUP_NEXT_X, y, w, SETUP_BTN_H,
                   go ? C_GO : C_INNER, go ? C_GO_E : C_EDGE, next_label, 2);
 }
@@ -845,7 +846,7 @@ static int order_ref(const tank_t *t) {
 static void order_bar(const tank_t *t, uint16_t *fb, int stride, int bx, int by, int segw, int bh, int tile_h, int item, int ref) {
     const bool front = tank_decor_above(t, item, ref);
     render_rect(fb, stride, bx, by, 2 * segw, bh, C_KEY);
-    static const char *const W[2] = { "BEHIND", "IN FRONT" };
+    static const char *const W[2] = { "后方", "前方" };
     for (int i = 0; i < 2; i++) {
         const int sx = bx + i * segw; const bool on = (i == 1) == front;
         if (on) { render_rect(fb, stride, sx, by, segw, bh, C_INNER); render_rect_edge(fb, stride, sx + 1, by + 1, segw - 2, bh - 2, C_EDGE); }
@@ -879,45 +880,45 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
     const int FLOOR = TANK_BOT - 16 - PAGE_Y;           /* the tank's sand line, in the page's coordinates */
     if (s_page == SETUP_PG_WELCOME) {
         panel(fb, stride);
-        text_c(fb, stride, CX, SETUP_Y + 36, 3, C_TEXT, "WELCOME");
+        text_c(fb, stride, CX, SETUP_Y + 36, 3, C_TEXT, "欢迎");
         static const char *const ls[] = {
-            "TWO FRY HAVE MOVED IN.",
-            "THEY EAT, PLAY, REST AND",
-            "GROW UP WHILE YOU WATCH.",
-            "EACH ONE THINKS FOR ITSELF.",
-            "FIRST, LET'S MEET THEM.",
+            "两条小鱼住进来了",
+            "它们会吃饭、玩耍、休息",
+            "在你的陪伴下慢慢长大",
+            "每条鱼都会独立思考",
+            "先来认识它们吧",
         };
         lines_c(fb, stride, SETUP_Y + 96, 24, C_CAPT, ls, 5);
-        render_button(fb, stride, SETUP_MID_X, SETUP_BTN_Y, SETUP_BTN_W, SETUP_BTN_H, C_INNER, C_EDGE, "NEXT", 2);
+        render_button(fb, stride, SETUP_MID_X, SETUP_BTN_Y, SETUP_BTN_W, SETUP_BTN_H, C_INNER, C_EDGE, "下一步", 2);
         dots(fb, stride, SETUP_Y + SETUP_H - 8);
     } else if (s_page == SETUP_PG_BUBBLES) {
         /* the live tank with a stripe down the column: drag it anywhere */
-        text_c(fb, stride, CX, SETUP_Y + 7, 2, C_CAPT, "PLACE THE BUBBLES");
-        nav(fb, stride, true, "NEXT", false);
+        text_c(fb, stride, CX, SETUP_Y + 7, 2, C_CAPT, "放置气泡柱");
+        nav(fb, stride, true, "下一步", false);
         int bx = (int)t->bubble_x - PAGE_X;
         render_rect_blend(fb, stride, bx - 22, SETUP_TOP_BTN_Y + SETUP_BTN_H + 10, 44, FLOOR - (SETUP_TOP_BTN_Y + SETUP_BTN_H + 10), C_EDGE, 46);
         chevron(fb, stride, bx, FLOOR - 34, true, C_EDGE);
-        text_c(fb, stride, CX, 296, 2, C_CAPT, "DRAG THEM LEFT OR RIGHT");
+        text_c(fb, stride, CX, 296, 2, C_CAPT, "左右拖动调整位置");
         dots(fb, stride, PAGE_H - 14);
     } else if (s_page == SETUP_PG_PLACE) {
         /* the live tank with a stripe over the piece's footprint: drag it
            anywhere on the water; the layer row picks its depth (the tank
            under the page redraws with it, so the fish and grass show the choice) */
-        char title[40]; snprintf(title, sizeof title, "PLACE THE %s", SD_ITEMS[s_item].name);
+        char title[40]; snprintf(title, sizeof title, "放置%s", SD_ITEMS[s_item].name);
         text_c(fb, stride, CX, SETUP_Y + 7, 2, C_CAPT, title);
-        render_button(fb, stride, SETUP_TOP_DONE_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_GO, C_GO_E, "DONE", 2);
+        render_button(fb, stride, SETUP_TOP_DONE_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_GO, C_GO_E, "完成", 2);
         /* SELL, top left (2026-09-24): a tap arms it and names the refund, a
            second tap sells the piece back to the shop and closes the page */
-        if (s_sell_armed) { char ok[16]; snprintf(ok, sizeof ok, "+%d OK?", progression_sell_value(s_item));
+        if (s_sell_armed) { char ok[16]; snprintf(ok, sizeof ok, "换取%d枚？", progression_sell_value(s_item));
                             render_button(fb, stride, SETUP_TOP_BACK_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_GO, C_GO_E, ok, 2); }
-        else render_button(fb, stride, SETUP_TOP_BACK_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_INNER, C_DIM, "SELL", 2);
+        else render_button(fb, stride, SETUP_TOP_BACK_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_INNER, C_DIM, "出售", 2);
         /* SHELVE beside it (0.3.9): put the piece away for later, kept as it is */
-        render_button(fb, stride, SETUP_TOP_SHELVE_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_INNER, C_EDGE, "SHELVE", 2);
+        render_button(fb, stride, SETUP_TOP_SHELVE_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_INNER, C_EDGE, "收纳", 2);
         /* LOCK between SHELVE and DONE (0.3.9): the word says the state - LOCK
            (open, an outlined button) or LOCKED (shut, a filled one) - never the
            color alone (Strato is color blind) */
-        if (tank_decor_locked(t, s_item)) render_button(fb, stride, SETUP_TOP_LOCK_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_FILL, C_TEXT, "LOCKED", 2);
-        else render_button(fb, stride, SETUP_TOP_LOCK_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_INNER, C_EDGE, "LOCK", 2);
+        if (tank_decor_locked(t, s_item)) render_button(fb, stride, SETUP_TOP_LOCK_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_FILL, C_TEXT, "已锁定", 2);
+        else render_button(fb, stride, SETUP_TOP_LOCK_X, SETUP_TOP_BTN_Y, SETUP_PL_BTN_W, SETUP_BTN_H, C_INNER, C_EDGE, "锁定", 2);
         /* the ORDER arrows (2026-10-17): a step back / forward in the stack of
            pieces at this depth, lit when there is a piece to pass; the relation
            is named on the hint line ("UNDER THE CORAL"). At the ends of the
@@ -932,25 +933,25 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
            long for where it sits (the hint line, or beside COLOR / LOOK) */
         char rel[40] = "";
         int rel_avail = PAGE_W - 2 * 56 - 8;                               /* the hint line: the box every glass shows whole */
-        if (s_item == 3) rel_avail = (SETUP_COL_N - 1) * SETUP_COL_PX + SETUP_COL_W - render_text_w("COLOR", 2) - 14;
-        if (s_item == 4) rel_avail = (SETUP_LOOK_N - 1) * SETUP_LOOK_PX + SETUP_LOOK_W - render_text_w("LOOK", 2) - 14;
+        if (s_item == 3) rel_avail = (SETUP_COL_N - 1) * SETUP_COL_PX + SETUP_COL_W - render_text_w("颜色", 2) - 14;
+        if (s_item == 4) rel_avail = (SETUP_LOOK_N - 1) * SETUP_LOOK_PX + SETUP_LOOK_W - render_text_w("外观", 2) - 14;
         for (int pass = 0; pass < 2; pass++) {
-            const char *the = pass ? "" : "THE ";
-            if (above >= 0) snprintf(rel, sizeof rel, "BEHIND %s%s", the, SD_ITEMS[above].name);
-            else if (below >= 0) snprintf(rel, sizeof rel, "IN FRONT OF %s%s", the, SD_ITEMS[below].name);
+            const char *the = pass ? "" : "";
+            if (above >= 0) snprintf(rel, sizeof rel, "位于%s%s后方", the, SD_ITEMS[above].name);
+            else if (below >= 0) snprintf(rel, sizeof rel, "位于%s%s前方", the, SD_ITEMS[below].name);
             if (render_text_w(rel, 2) <= rel_avail) break;
         }
         /* the DEPTH bar: one outlined box, three joined segments, the chosen
            one lit; a picture tile on each and the word under it */
-        static const char *const zl[DECOR_Z_N] = { "BEHIND", "AMONG", "IN FRONT" };
-        static const char *const hint[DECOR_Z_N] = { "IN FRONT OF THE SEAGRASS", "", "IN FRONT OF THE SEAGRASS" };   /* (the sword plant:
+        static const char *const zl[DECOR_Z_N] = { "后方", "中间", "前方" };
+        static const char *const hint[DECOR_Z_N] = { "位于水草前方", "", "位于水草前方" };   /* (the sword plant:
                                                                    one depth since 0.4, over the seagrass - the fish choose their own) */
-        static const char *const castle_hint[DECOR_Z_N] = { "THE PLANTS GROW IN FRONT OF IT", "", "IT STANDS IN FRONT OF THE PLANTS" };
-        static const char *const coral_hint[DECOR_Z_N] = { "BEHIND THE GRASS AND THE FISH", "", "IN FRONT OF EVERYTHING" };
+        static const char *const castle_hint[DECOR_Z_N] = { "水草会长在它的前面", "", "它会挡在水草前面" };
+        static const char *const coral_hint[DECOR_Z_N] = { "位于水草和鱼的后方", "", "放在最前方" };
         int z = tank_decor_z(t, s_item), zi = tank_decor_z_index(s_item, z);
         int n = tank_decor_z_count(s_item), bw = n * SETUP_DEPTH_SEG_W, bx = (PAGE_W - bw) / 2;   /* the item's own depths */
         if (n > 1) {                                                       /* (the plant has one depth: no bar, 0.4) */
-        text_c(fb, stride, CX, SETUP_DEPTH_Y - 18, 2, C_CAPT, "DEPTH");
+        text_c(fb, stride, CX, SETUP_DEPTH_Y - 18, 2, C_CAPT, "前后层次");
         render_rect(fb, stride, bx, SETUP_DEPTH_Y, bw, SETUP_DEPTH_H, C_KEY);
         for (int i = 0; i < n; i++) {
             int sx = bx + i * SETUP_DEPTH_SEG_W, zi_ = tank_decor_z_at(s_item, i);
@@ -967,9 +968,9 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
                                                                SEAGRASS; with a piece beside it, the ORDER SQUARES a row down under that piece's name. Each row's
                                                                caption names what it is behind or in front of: no hint line */
             const bool under = tank_plant_under(t);
-            text_c(fb, stride, CX, SETUP_DEPTH_Y - 18, 2, C_CAPT, "THE SEAGRASS");
+            text_c(fb, stride, CX, SETUP_DEPTH_Y - 18, 2, C_CAPT, "水草");
             render_rect(fb, stride, SETUP_ORDSQ_X, SETUP_DEPTH_Y, 2 * SETUP_DEPTH_SEG_W, SETUP_DEPTH_H, C_KEY);
-            static const char *const W[2] = { "BEHIND", "IN FRONT" };
+            static const char *const W[2] = { "后方", "前方" };
             for (int i = 0; i < 2; i++) {
                 const int sx = SETUP_ORDSQ_X + i * SETUP_DEPTH_SEG_W; const bool on = (i == 0) == under;
                 if (on) { render_rect(fb, stride, sx, SETUP_DEPTH_Y, SETUP_DEPTH_SEG_W, SETUP_DEPTH_H, C_INNER);
@@ -981,7 +982,7 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
             render_rect_edge(fb, stride, SETUP_ORDSQ_X, SETUP_DEPTH_Y, 2 * SETUP_DEPTH_SEG_W, SETUP_DEPTH_H, C_EDGE);
             const int ref = order_ref(t);
             if (ref >= 0) {
-                char cap[40]; snprintf(cap, sizeof cap, "THE %s", SD_ITEMS[ref].name);
+                char cap[40]; snprintf(cap, sizeof cap, "%s", SD_ITEMS[ref].name);
                 text_c(fb, stride, CX, SETUP_ORDSQ2_Y - 18, 2, C_CAPT, cap);
                 order_bar(t, fb, stride, SETUP_ORDSQ_X, SETUP_ORDSQ2_Y, SETUP_DEPTH_SEG_W, SETUP_DEPTH_H, SETUP_DEPTH_TILE_H, s_item, ref);
             }
@@ -992,7 +993,7 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
                the brain as three bands over the look's name - the pick ringed */
             int look = tank_cluster_scheme(t);
             render_rect_blend(fb, stride, -PAGE_X, SETUP_LOOK_Y - 22, TANK_W, SETUP_LOOK_H + 30, C_PANEL, 110);
-            render_text(fb, stride, SETUP_LOOK_X + 2, SETUP_LOOK_Y - 18, 2, C_CAPT, "LOOK");
+            render_text(fb, stride, SETUP_LOOK_X + 2, SETUP_LOOK_Y - 18, 2, C_CAPT, "外观");
             if (rel[0]) render_text(fb, stride, SETUP_LOOK_X + SETUP_LOOK_N * SETUP_LOOK_PX - SETUP_LOOK_PX + SETUP_LOOK_W - 2 - render_text_w(rel, 2), SETUP_LOOK_Y - 18, 2, C_CAPT, rel);
             for (int i = 0; i < SETUP_LOOK_N; i++) {
                 int x = SETUP_LOOK_X + i * SETUP_LOOK_PX; bool on = i == look;
@@ -1002,7 +1003,7 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
                 render_rect(fb, stride, x + 3, SETUP_LOOK_Y + 3, bw, 14, sc->coral);
                 render_rect(fb, stride, x + 3 + bw, SETUP_LOOK_Y + 3, bw, 14, sc->tube);
                 render_rect(fb, stride, x + 3 + 2 * bw, SETUP_LOOK_Y + 3, SETUP_LOOK_W - 6 - 2 * bw, 14, sc->brain);
-                text_c(fb, stride, x + SETUP_LOOK_W / 2, SETUP_LOOK_Y + 20, 2, on ? C_TEXT : dim(C_CAPT, 45), sc->name);
+                text_c(fb, stride, x + SETUP_LOOK_W / 2, SETUP_LOOK_Y + 20, 2, on ? C_TEXT : dim(C_CAPT, 45), ui_zh_label(sc->name));
                 render_rect_edge(fb, stride, x, SETUP_LOOK_Y, SETUP_LOOK_W, SETUP_LOOK_H, on ? C_TEXT : C_DIM);
                 if (on) render_rect_edge(fb, stride, x + 1, SETUP_LOOK_Y + 1, SETUP_LOOK_W - 2, SETUP_LOOK_H - 2, C_TEXT);
             }
@@ -1012,7 +1013,7 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
                row's caption */
             uint32_t rgb = tank_coral_rgb(t);
             render_rect_blend(fb, stride, -PAGE_X, SETUP_COL_Y - 22, TANK_W, SETUP_COL_H + 30, C_PANEL, 110);   /* a band the swatches read on, like the colour page's */
-            render_text(fb, stride, SETUP_COL_X + 2, SETUP_COL_Y - 18, 2, C_CAPT, "COLOR");
+            render_text(fb, stride, SETUP_COL_X + 2, SETUP_COL_Y - 18, 2, C_CAPT, "颜色");
             if (rel[0]) render_text(fb, stride, SETUP_COL_X + (SETUP_COL_N - 1) * SETUP_COL_PX + SETUP_COL_W - 2 - render_text_w(rel, 2), SETUP_COL_Y - 18, 2, C_CAPT, rel);
             (void)coral_hint;
             for (int i = 0; i < SETUP_COL_N; i++) {
@@ -1030,7 +1031,7 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
         int sy = (int)top - 8; if (sy < place_y()) sy = place_y();
         render_rect_blend(fb, stride, (int)x0, sy, (int)(x1 - x0), FLOOR - sy + 4, C_EDGE, 46);
         chevron(fb, stride, (int)((x0 + x1) * 0.5f), FLOOR - 34, true, C_EDGE);
-        text_c(fb, stride, CX, 296, 2, C_CAPT, "DRAG IT LEFT OR RIGHT");
+        text_c(fb, stride, CX, 296, 2, C_CAPT, "左右拖动调整位置");
     } else if (page_is_name() && s_kbd) {
         /* the two rejected designs, drawn as they were: a panel over the tank,
            the name as underlined slots (the next free one blinks; an untouched
@@ -1038,7 +1039,7 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
         const fish_t *f = &t->fish[page_fish()];
         bool grid = s_kbd == SETUP_KBD_GRID;
         panel(fb, stride);
-        text_c(fb, stride, CX, SETUP_Y + (grid ? 12 : 7), 2, C_CAPT, s_rename ? "RENAME YOUR FISH" : s_birth ? "NAME THE NEW FRY" : page_fish() == 0 ? "NAME THE FIRST FISH" : "NAME THE SECOND FISH");
+        text_c(fb, stride, CX, SETUP_Y + (grid ? 12 : 7), 2, C_CAPT, s_rename ? "给鱼儿改名" : s_birth ? "给新鱼苗取名" : page_fish() == 0 ? "给第一条鱼取名" : "给第二条鱼取名");
         if (grid) render_fish_preview(fb, stride, SETUP_X + 88, SETUP_Y + 72, 2.0f, f->color, f->fin, f->accent, f, FISH_ROOM_CARD, clock);
         const int SL = 22, NX = grid ? SETUP_X + 160 : CX - FISH_NAME_MAX * SL / 2 + 2, NY = grid ? SETUP_Y + 58 : SETUP_TOP_BTN_Y + (SETUP_BTN_H - 28) / 2;
         int n = name_len(f);
@@ -1052,20 +1053,20 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
             int x = KG_X + kg_col(k) * KG_PX, y = KG_Y + kg_row(k) * KG_PY, w = kg_w(k);
             render_rect(fb, stride, x, y, w, KG_H, C_KEY);
             render_rect_edge(fb, stride, x, y, w, KG_H, C_DIM);
-            char lab[4] = { (char)('A' + k), 0 };
-            if (k == SETUP_KEY_DEL) strcpy(lab, "DEL");
+            char lab[8] = { (char)('A' + k), 0 };
+            if (k == SETUP_KEY_DEL) strcpy(lab, "删除");
             render_text(fb, stride, x + (w - render_text_w(lab, 2)) / 2, y + (KG_H - 14) / 2, 2, C_TEXT, lab);
         } else for (int cell = 0; cell < KP_COLS * KP_ROWS; cell++) {
             int k = kp_key(cell), x = KP_X + (cell % KP_COLS) * KP_PX, y = KP_Y + (cell / KP_COLS) * KP_PY;
             bool special = k >= 26;
             render_rect(fb, stride, x, y, KP_W, KP_H, special ? C_INNER : C_KEY);
             render_rect_edge(fb, stride, x, y, KP_W, KP_H, special ? C_EDGE : C_DIM);
-            char lab[4] = { (char)('A' + k), 0 };
-            if (k == SETUP_KEY_DEL) strcpy(lab, "DEL");
+            char lab[8] = { (char)('A' + k), 0 };
+            if (k == SETUP_KEY_DEL) strcpy(lab, "删除");
             if (k == SETUP_KEY_PAGE) strcpy(lab, s_kb_page ? "A-M" : "N-Z");
             render_text(fb, stride, x + (KP_W - render_text_w(lab, 3)) / 2, y + (KP_H - 21) / 2, 3, C_TEXT, lab);
         }
-        nav(fb, stride, !grid, s_rename ? "DONE" : "NEXT", s_rename);
+        nav(fb, stride, !grid, s_rename ? "完成" : "下一步", s_rename);
         if (grid) dots(fb, stride, SETUP_Y + SETUP_H - 8);
     } else if (page_is_name()) {
         /* straight on the tank: the fish being named wears a ring in its own
@@ -1080,8 +1081,8 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
             text_c(fb, stride, (SETUP_ED_NOW_X + SETUP_ED_GROWN_X) / 2, SETUP_NAME_PREVIEW_Y - 10, 3, C_CAPT, ">");
         }
         render_rect_blend(fb, stride, -PAGE_X, SETUP_SLOT_Y - SETUP_ARROW_GAP - 2, TANK_W, SETUP_SLOT_H + 2 * SETUP_ARROW_GAP + 36, C_PANEL, 150);
-        text_c(fb, stride, CX, SETUP_Y + 7, 2, C_CAPT, s_rename ? "RENAME YOUR FISH" : s_birth ? "NAME THE NEW FRY" : page_fish() == 0 ? "NAME THE FIRST FISH" : "NAME THE SECOND FISH");
-        nav(fb, stride, true, s_rename ? "DONE" : "NEXT", s_rename);
+        text_c(fb, stride, CX, SETUP_Y + 7, 2, C_CAPT, s_rename ? "给鱼儿改名" : s_birth ? "给新鱼苗取名" : page_fish() == 0 ? "给第一条鱼取名" : "给第二条鱼取名");
+        nav(fb, stride, true, s_rename ? "完成" : "下一步", s_rename);
         int n = name_len(f);
         if (s_slot > n) s_slot = n;
         for (int i = 0; i < FISH_NAME_MAX; i++) {
@@ -1097,17 +1098,17 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
                 chevron(fb, stride, x + SETUP_SLOT_W / 2, SETUP_SLOT_Y + SETUP_SLOT_H + SETUP_ARROW_GAP + 4, false, C_EDGE);
             }
         }
-        text_c(fb, stride, CX, SETUP_SLOT_Y + SETUP_SLOT_H + 96, 2, C_CAPT, "SWIPE A LETTER UP OR DOWN");
+        text_c(fb, stride, CX, SETUP_SLOT_Y + SETUP_SLOT_H + 96, 2, C_CAPT, "上下滑动选择字母");
         dots(fb, stride, PAGE_H - 14);
     } else if (page_is_look()) {
         /* THE EDITOR (setup.h): straight on the tank, the fry ringed on stage
            (NOW), the grown fish on a dark plate (GROWN UP), the rows under a
            panel band */
         const fish_t *f = &t->fish[page_fish()];
-        char cap[40]; snprintf(cap, sizeof cap, "%s FOR THE %s FISH", page_is_form() ? "A FORM" : "COLORS", page_fish() ? "SECOND" : "FIRST");   /* not named yet (0.4) */
+        char cap[40]; snprintf(cap, sizeof cap, "选择%s（第%s条鱼）", page_is_form() ? "体型" : "配色", page_fish() ? "二" : "一");   /* not named yet (0.4) */
         text_c(fb, stride, CX, SETUP_Y + 7, 2, C_CAPT, cap);
-        nav(fb, stride, true, "NEXT", false);
-        render_button(fb, stride, SETUP_ROLL_X, SETUP_TOP_BTN_Y, SETUP_TOP_BTN_W, SETUP_BTN_H, C_KEY, C_DIM, "ROLL", 2);
+        nav(fb, stride, true, "下一步", false);
+        render_button(fb, stride, SETUP_ROLL_X, SETUP_TOP_BTN_Y, SETUP_TOP_BTN_W, SETUP_BTN_H, C_KEY, C_DIM, "随机", 2);
         const edit_row_t *r; int n = edit_rows(&r);
         int band = SETUP_ED_CAPTION_Y - 6;                       /* from the captions down: fish swim behind them */
         render_rect_blend(fb, stride, -PAGE_X, band, TANK_W, r[n - 1].y + r[n - 1].h + 10 - band, C_PANEL, 110);
@@ -1115,13 +1116,13 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
         render_rect_blend(fb, stride, SETUP_ED_GROWN_X - 72, SETUP_ED_PREVIEW_Y - 26, 144, 54, C_PANEL, 150);   /* clear of the buttons */
         render_fish_preview(fb, stride, SETUP_ED_GROWN_X, SETUP_ED_PREVIEW_Y, SETUP_ED_GROWN_SIZE, f->color, f->fin, f->accent, f, FISH_ROOM_CARD, clock);
         text_c(fb, stride, (SETUP_ED_NOW_X + SETUP_ED_GROWN_X) / 2, SETUP_ED_PREVIEW_Y - 10, 3, C_CAPT, ">");
-        text_c(fb, stride, SETUP_ED_NOW_X, SETUP_ED_CAPTION_Y, 2, C_CAPT, "NOW");
-        text_c(fb, stride, SETUP_ED_GROWN_X, SETUP_ED_CAPTION_Y, 2, C_CAPT, "GROWN UP");
+        text_c(fb, stride, SETUP_ED_NOW_X, SETUP_ED_CAPTION_Y, 2, C_CAPT, "现在");
+        text_c(fb, stride, SETUP_ED_GROWN_X, SETUP_ED_CAPTION_Y, 2, C_CAPT, "长大后");
         for (int k = 0; k < n; k++) {
             int cur = tank_gene(f, r[k].gene);
             char lab[32];
-            if (r[k].gene == GENE_PATTERN) snprintf(lab, sizeof lab, "%s  %s", r[k].label, PATTERN_NAMES[cur]);   /* its tiles carry no names */
-            else if (r[k].gene == GENE_ACCENT && s_same_note > 0) snprintf(lab, sizeof lab, "%s  SAME AS ITS BODY", r[k].label);
+            if (r[k].gene == GENE_PATTERN) snprintf(lab, sizeof lab, "%s  %s", r[k].label, ui_zh_label(PATTERN_NAMES[cur]));   /* its tiles carry no names */
+            else if (r[k].gene == GENE_ACCENT && s_same_note > 0) snprintf(lab, sizeof lab, "%s 与身体同色", r[k].label);
             else snprintf(lab, sizeof lab, "%s", r[k].label);
             bool unused = r[k].gene == GENE_ACCENT && f->pattern == PATTERN_SOLID;   /* a solid fish wears no markings */
             render_text(fb, stride, r[k].x + 2, r[k].y - SETUP_LABEL_DY, 2, unused ? dim(C_CAPT, 45) : C_CAPT, lab);
@@ -1151,7 +1152,7 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
                 else {
                     render_fish_preview(fb, stride, x + w / 2.0f, y + 21, 1.0f, f->color, f->fin, f->accent, &form, FISH_ROOM_ROW, clock);
                     text_c(fb, stride, x + w / 2, y + h - 17, 2, on ? C_TEXT : dim(C_CAPT, 60),
-                           r[k].gene == GENE_SHAPE ? SHAPE_NAMES[i] : FINS_NAMES[i]);
+                           r[k].gene == GENE_SHAPE ? ui_zh_label(SHAPE_NAMES[i]) : ui_zh_label(FINS_NAMES[i]));
                 }
             }
             if (unused)                                     /* a solid fish: the markings row stands back (still a pick away -
@@ -1170,14 +1171,14 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
         fish_ring(fb, stride, f, r, f->color);
         fish_ring(fb, stride, f, r + 8, mut ? C_NEW : C_EDGE);     /* a mutation: a gold outer ring */
         render_rect_blend(fb, stride, -PAGE_X, 92, TANK_W, mut ? 138 : 116, C_PANEL, 150);
-        text_c(fb, stride, CX, 104, 3, C_TEXT, "A NEW FRY!");
+        text_c(fb, stride, CX, 104, 3, C_TEXT, "新鱼苗诞生！");
         char l1[FISH_NAME_MAX * 2 + 24]; const char *l2;
         setup_born_lines(t, page_fish(), l1, sizeof l1, &l2);
         text_c(fb, stride, CX, 140, 2, C_CAPT, l1);
         text_c(fb, stride, CX, 162, 2, C_CAPT, l2);
-        text_c(fb, stride, CX, 184, 2, C_CAPT, "GO AND SAY HELLO.");
+        text_c(fb, stride, CX, 184, 2, C_CAPT, "快来认识它吧");
         if (mut) text_c(fb, stride, CX, 206, 2, C_NEW, news);      /* 0.4: neither parent shows it */
-        render_button(fb, stride, SETUP_MID_X, SETUP_BTN_Y, SETUP_BTN_W, SETUP_BTN_H, C_GO, C_GO_E, "MEET IT", 2);
+        render_button(fb, stride, SETUP_MID_X, SETUP_BTN_Y, SETUP_BTN_W, SETUP_BTN_H, C_GO, C_GO_E, "认识它", 2);
         dots(fb, stride, PAGE_H - 14);
     } else if (s_page == SETUP_PG_FAMILY) {
         /* the family page (setup.h): NOW and GROWN UP, then each gene and
@@ -1192,25 +1193,25 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
         render_fish_portrait(fb, stride, SETUP_FAM_NOW_X, SETUP_FAM_PORTRAIT_Y, ps, f, FISH_ROOM_FAM, clock);
         text_c(fb, stride, (SETUP_FAM_NOW_X + SETUP_FAM_GROWN_X) / 2 - 6, SETUP_FAM_PORTRAIT_Y - 10, 3, C_CAPT, ">");
         render_fish_preview(fb, stride, SETUP_FAM_GROWN_X, SETUP_FAM_PORTRAIT_Y, SETUP_FAM_GROWN_SIZE, f->color, f->fin, f->accent, f, FISH_ROOM_FAM, clock);
-        render_text(fb, stride, SETUP_FAM_FROM_X, SETUP_FAM_ROW_Y - 20, 2, dim(C_CAPT, 60), "FROM");
+        render_text(fb, stride, SETUP_FAM_FROM_X, SETUP_FAM_ROW_Y - 20, 2, dim(C_CAPT, 60), "来自");
         bool hidden = false;
         for (int g = 0; g < GENE_N; g++) {
             int y = SETUP_FAM_ROW_Y + g * SETUP_FAM_ROW_DY, vx = SETUP_FAM_VALUE_X;
-            static const char *const LABEL[GENE_N] = { "SHAPE", "FINS", "PATTERN", "BODY", "MARKINGS" };
+            static const char *const LABEL[GENE_N] = { "体型", "鱼鳍", "图案", "身体", "花纹" };
             render_text(fb, stride, SETUP_FAM_LABEL_X, y, 2, C_CAPT, LABEL[g]);
             if (g == GENE_BODY || g == GENE_ACCENT) {
                 uint32_t rgb = g == GENE_BODY ? f->color : f->accent;
                 render_rect(fb, stride, vx, y - 1, 16, 16, rgb); render_rect_edge(fb, stride, vx, y - 1, 16, 16, C_INNER);
-            } else render_text(fb, stride, vx, y, 2, C_TEXT, g == GENE_SHAPE ? SHAPE_NAMES[f->shape] : g == GENE_FINS ? FINS_NAMES[f->fins] : PATTERN_NAMES[f->pattern]);
-            if (f->mutated == g + 1) { render_text(fb, stride, SETUP_FAM_FROM_X, y, 2, C_NEW, "NEW!"); continue; }
-            if (from_shop(f)) { render_text(fb, stride, SETUP_FAM_FROM_X, y, 2, C_CAPT, "THE SHOP"); continue; }   /* (0.4.1: was "?" on every row) */
+            } else render_text(fb, stride, vx, y, 2, C_TEXT, g == GENE_SHAPE ? ui_zh_label(SHAPE_NAMES[f->shape]) : g == GENE_FINS ? ui_zh_label(FINS_NAMES[f->fins]) : ui_zh_label(PATTERN_NAMES[f->pattern]));
+            if (f->mutated == g + 1) { render_text(fb, stride, SETUP_FAM_FROM_X, y, 2, C_NEW, "新成员！"); continue; }
+            if (from_shop(f)) { render_text(fb, stride, SETUP_FAM_FROM_X, y, 2, C_CAPT, "商店"); continue; }   /* (0.4.1: was "?" on every row) */
             parent_t p = parent_of(t, f, (f->from_b >> g & 1) ? 1 : 0);
             bool sec = f->from_carried >> g & 1;
             hidden |= sec;
             text_named(fb, stride, SETUP_FAM_FROM_X, y, "", p.name, p.known ? p.color : C_DIM, sec ? " *" : NULL);
         }
-        if (hidden) text_c(fb, stride, CX, SETUP_FAM_NOTE_Y, 2, dim(C_CAPT, 70), "* HIDDEN IN THAT PARENT");
-        nav(fb, stride, false, "NEXT", false);
+        if (hidden) text_c(fb, stride, CX, SETUP_FAM_NOTE_Y, 2, dim(C_CAPT, 70), "星号表示亲代携带的特征");
+        nav(fb, stride, false, "下一步", false);
         dots(fb, stride, SETUP_Y + SETUP_H - 8);
     } else if (s_page == SETUP_PG_NATURE) {
         /* the nature page: how bold and sociable it is next to its parents'
@@ -1219,13 +1220,13 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
         parent_t PA = parent_of(t, f, 0), PB = parent_of(t, f, 1);
         const parent_t *pa = PA.known ? &PA : NULL, *pb = PB.known ? &PB : NULL;
         bool shop = from_shop(f);                                    /* bought (0.3.5): its look is the shop's */
-        const char *na = shop ? "THE SHOP" : PA.name, *nb = shop ? "THE SHOP" : PB.name;
+        const char *na = shop ? "商店" : PA.name, *nb = shop ? "商店" : PB.name;
         uint32_t ca = pa ? name_rgb(pa->color) : shop ? C_CAPT : C_DIM, cb = pb ? name_rgb(pb->color) : shop ? C_CAPT : C_DIM;
         panel(fb, stride);
         text_c(fb, stride, CX, SETUP_Y + 20, 3, C_TEXT, f->name);
-        text_c(fb, stride, CX, SETUP_Y + 56, 2, C_CAPT, "ITS NATURE");
+        text_c(fb, stride, CX, SETUP_Y + 56, 2, C_CAPT, "它的性格");
         int y = SETUP_NAT_ROW_Y, vx = SETUP_FAM_VALUE_X + 12;
-        static const char *const TRAIT[2] = { "BOLD", "SOCIAL" };
+        static const char *const TRAIT[2] = { "胆量", "合群" };
         for (int k = 0; k < 2; k++, y += SETUP_NAT_ROW_DY) {          /* the fry's own bar, the parents' ticks */
             float v = k ? f->sociable : f->bold;
             float va = pa ? (k ? pa->sociable : pa->bold) : -1, vb = pb ? (k ? pb->sociable : pb->bold) : -1;
@@ -1240,28 +1241,28 @@ void render_setup(const tank_t *t, uint16_t *fb, int stride, double clock) {
                 render_rect(fb, stride, tx - 1, by - 4, 3, SETUP_FAM_BAR_H + 8, p ? cb : ca);
             }
         }
-        render_text(fb, stride, SETUP_FAM_LABEL_X, y, 2, C_CAPT, "PARENTS");
-        if (shop) render_text(fb, stride, vx, y, 2, C_CAPT, "NONE HERE");
+        render_text(fb, stride, SETUP_FAM_LABEL_X, y, 2, C_CAPT, "双亲");
+        if (shop) render_text(fb, stride, vx, y, 2, C_CAPT, "尚无记录");
         else {
             render_text(fb, stride, vx, y, 2, ca, na);
             render_text(fb, stride, vx + render_text_w(na, 2) + 16, y, 2, cb, nb);
         }
-        nav(fb, stride, false, "DONE", true);
+        nav(fb, stride, false, "完成", true);
         dots(fb, stride, SETUP_Y + SETUP_H - 8);
     } else {                                                        /* SETUP_PG_CARE */
         panel(fb, stride);
-        text_c(fb, stride, CX, SETUP_Y + 22, 3, C_TEXT, "CARING FOR THEM");
+        text_c(fb, stride, CX, SETUP_Y + 22, 3, C_TEXT, "照顾鱼儿");
         static const char *const ls[] = {
-            "TAP THE SURFACE TO FEED",
-            "HOLD A FINGER AND THEY VISIT",
-            "TAP A FISH TO CHECK ON IT",
-            "DRAG THE GLASS TO WIPE ALGAE",
-            "SWIPE ACROSS GRASS TO TRIM",
-            "TWO TAPS FLIP THE LIGHT",
-            "THEY CHOOSE. YOU CARE.",
+            "轻点水面即可投食",
+            "按住屏幕，鱼儿会靠近",
+            "轻点鱼儿查看状态",
+            "擦拭玻璃清理藻类",
+            "横向划过水草即可修剪",
+            "双击屏幕切换灯光",
+            "它们自主生活，你来用心照料",
         };
         lines_c(fb, stride, SETUP_Y + 66, 24, C_CAPT, ls, 7);
-        nav(fb, stride, false, "BEGIN", true);
+        nav(fb, stride, false, "开始养鱼", true);
         dots(fb, stride, SETUP_Y + SETUP_H - 8);
     }
 }

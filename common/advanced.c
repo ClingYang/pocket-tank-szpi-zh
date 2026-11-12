@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* advanced.c - THE ADVANCED PAGE (0.3.9.2): see advanced.h. */
 #include "advanced.h"
 #include "render.h"
@@ -125,8 +126,8 @@ static void touch_page(const char *msg) { s_live = s_saved; s_msg = msg; go(ADV_
 void adv_tick(float dt) {
     if (s_pg == ADV_PG_NONE) return;
     s_t += dt;
-    if (s_pg == ADV_PG_CROSS && s_t > ADV_CROSS_IDLE_S) touch_page("STOPPED - NOTHING CHANGED");
-    if (s_pg == ADV_PG_CHECK && s_t > ADV_CHECK_S) touch_page("KEPT THE OLD TOUCH");
+    if (s_pg == ADV_PG_CROSS && s_t > ADV_CROSS_IDLE_S) touch_page("已停止，原配置保留");
+    if (s_pg == ADV_PG_CHECK && s_t > ADV_CHECK_S) touch_page("已保留原校准");
 }
 static int step_pick(int dir) {
     for (int i = 0; i < N_SIZES; i++)
@@ -170,20 +171,20 @@ int adv_touch(float x, float y, bool down, int q) {
         int h = render_touch_intro_tap(s_dx, s_dy, own);
         if (h == ADV_HIT_BACK) { s_msg = NULL; go(ADV_PG_MAIN); return ADV_ACT_TICK; }
         if (h == ADV_HIT_START) { s_live = TOUCH_FIT_NONE; s_i = 0; s_q0 = q; s_msg = NULL; go(ADV_PG_CROSS); return ADV_ACT_TICK; }
-        if (h == ADV_HIT_RESET && own) { s_saved = s_live = TOUCH_FIT_NONE; s_msg = "TOUCH BACK TO NORMAL"; return ADV_ACT_FIT; }
+        if (h == ADV_HIT_RESET && own) { s_saved = s_live = TOUCH_FIT_NONE; s_msg = "已恢复原触摸配置"; return ADV_ACT_FIT; }
         return ADV_ACT_NONE; }
     case ADV_PG_CROSS: {                                   /* any press counts: where it LANDED (the finger's aim, before its roll) */
         if (q != s_q0) { s_i = 0; s_q0 = q; s_t = 0; return ADV_ACT_NONE; }   /* the picture turned mid-sitting: start over */
         adv_cross_target(s_i, &s_tx[s_i], &s_ty[s_i]);
         s_px[s_i] = s_dx; s_py[s_i] = s_dy; s_i++; s_t = 0;
         if (s_i < ADV_N_CROSS) return ADV_ACT_TICK;
-        if (!touch_fit_solve(s_tx, s_ty, s_px, s_py, ADV_N_CROSS, s_q0, &s_new)) { touch_page("DID NOT WORK - TRY AGAIN"); return ADV_ACT_TICK; }
+        if (!touch_fit_solve(s_tx, s_ty, s_px, s_py, ADV_N_CROSS, s_q0, &s_new)) { touch_page("校准未成功，请重试"); return ADV_ACT_TICK; }
         s_live = s_new; go(ADV_PG_CHECK);                  /* the next press goes through the new map */
         return ADV_ACT_TICK; }
     case ADV_PG_CHECK: {
         float cx, cy; adv_check_target(&cx, &cy);
         if ((s_dx - cx) * (s_dx - cx) + (s_dy - cy) * (s_dy - cy) > ADV_CHECK_HIT_PX * ADV_CHECK_HIT_PX) return ADV_ACT_NONE;   /* a miss: the clock runs on */
-        s_saved = s_new; touch_page("NEW TOUCH SAVED");
+        s_saved = s_new; touch_page("新校准已保存");
         return ADV_ACT_FIT; }
     }
     return ADV_ACT_NONE;

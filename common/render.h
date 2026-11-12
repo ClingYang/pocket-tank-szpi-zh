@@ -17,7 +17,11 @@
  * tap tests take the frame's, as the touch ports report them. In the
  * rectangle the two are the same thing. */
 #define PAGE_W 448
+#ifdef TANK_SZPI
+#define PAGE_H 360
+#else
 #define PAGE_H 368
+#endif
 #define PAGE_X ((TANK_W - PAGE_W) / 2)
 #define PAGE_Y ((TANK_H - PAGE_H) / 2)
 #ifdef TANK_ROUND               /* the bowl's circle cuts the page's corners: a few buttons are drawn in from the glass */
@@ -586,6 +590,9 @@ void render_settings_cancel(void);              /* forget the press in hand (the
  * pixel size of one font dot (2 = caption, 3 = button). */
 int  render_text_w(const char *s, int scale);
 void render_text(uint16_t *fb, int stride, int x, int y, int scale, uint32_t rgb, const char *s);
+#ifdef TANK_SZPI
+void render_text_case(uint16_t *fb, int stride, int x, int y, int scale, uint32_t rgb, const char *s);
+#endif
 void render_rect(uint16_t *fb, int stride, int x, int y, int w, int h, uint32_t rgb);
 void render_rect_blend(uint16_t *fb, int stride, int x, int y, int w, int h, uint32_t rgb, int alpha);   /* alpha 0..255 */
 void render_rect_edge(uint16_t *fb, int stride, int x, int y, int w, int h, uint32_t rgb);

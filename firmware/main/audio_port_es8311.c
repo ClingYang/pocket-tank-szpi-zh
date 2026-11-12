@@ -21,11 +21,19 @@
 
 static const char *TAG = "audio";
 
+#ifdef CONFIG_POCKET_TANK_SZPI
+#include "board_szpi.h"
+#define PIN_I2S_MCLK SZPI_I2S_MCLK
+#define PIN_I2S_BCLK SZPI_I2S_BCLK
+#define PIN_I2S_WS SZPI_I2S_WS
+#define PIN_I2S_DOUT SZPI_I2S_DOUT
+#else
 #define PIN_I2S_MCLK  (board_is_square() ? S_PIN_I2S_MCLK : board_is_175() ? B_PIN_I2S_MCLK : 16)   /* the square: 16 is its PWR key sense; the 1.75: 42 */
 #define PIN_I2S_BCLK  (board_is_watch() ? W_PIN_I2S_BCLK : 9)
 #define PIN_I2S_WS    45
 #define PIN_I2S_DOUT  (board_is_watch() ? W_PIN_I2S_DOUT : 8)        /* ESP -> codec DSDIN */
 #define PIN_AMP_EN    46       /* NS4150B CTRL, 10k pulldown on the board */
+#endif
 #define BLOCK         160      /* 10 ms at 16 kHz */
 #define IDLE_US       (2 * 1000000LL)
 #define CODEC_RAIL    "aldo1"  /* A3V3: the codec's AVDD + the mic */
@@ -39,8 +47,13 @@ static TaskHandle_t       s_task;
 static bool s_ok, s_up;
 static volatile bool s_sleep_req, s_warm_req;
 static int64_t s_quiet_since;
+#ifdef CONFIG_POCKET_TANK_SZPI
+static int s_volume = 0;                     /* SZPI starts muted. Saved user preferences are loaded below. */
+static int s_saved_volume = 0;
+#else
 static int s_volume = 100;                   /* percent (0.4: the settings slider), 0 = off */
 static int s_saved_volume = 100;             /* ... as last read from or written to NVS (audio_port_restore_volume) */
+#endif
 static int16_t s_buf[BLOCK];
 /* cold-start settle, tunable live (director `snd settle <codec ms> <amp ms>`,
    `snd idle <s>`) until the bench says what the DAC and the NS4150B need */
@@ -55,7 +68,13 @@ static int64_t s_idle_us = 5 * 1000000LL;
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-static void amp(bool on) { gpio_set_level(PIN_AMP_EN, on); }
+static void amp(bool on) {
+#ifdef CONFIG_POCKET_TANK_SZPI
+    board_szpi_amp(on);
+#else
+    gpio_set_level(PIN_AMP_EN, on);
+#endif
+}
 
 /* Deep sleep (2026-09-16, the night the tank died): the I2S lines and the
  * amp's CTRL are the ESP's outputs into ICs that stay powered on VCC3V3 all
@@ -68,9 +87,16 @@ static void amp(bool on) { gpio_set_level(PIN_AMP_EN, on); }
  * held. The codec is already down (audio_port_sleep) and the wake is a
  * reboot; audio_port_init releases the holds before the drivers claim the
  * pins again. */
+#ifdef CONFIG_POCKET_TANK_SZPI
+#define QUIET_N 4
+#else
 #define QUIET_N 5
+#endif
 static void quiet_pins(gpio_num_t p[QUIET_N]) {    /* per board: known once the display port has probed the bus */
-    p[0] = PIN_I2S_MCLK; p[1] = PIN_I2S_BCLK; p[2] = PIN_I2S_WS; p[3] = PIN_I2S_DOUT; p[4] = PIN_AMP_EN;
+    p[0] = PIN_I2S_MCLK; p[1] = PIN_I2S_BCLK; p[2] = PIN_I2S_WS; p[3] = PIN_I2S_DOUT;
+#ifndef CONFIG_POCKET_TANK_SZPI
+    p[4] = PIN_AMP_EN;
+#endif
 }
 void audio_port_deep_sleep_pins(void) {
     gpio_num_t QUIET_PINS[QUIET_N]; quiet_pins(QUIET_PINS);
@@ -170,8 +196,11 @@ bool audio_port_init(i2c_master_bus_handle_t bus) {
     size_t bank_bytes = (size_t)(_binary_sounds_bin_end - _binary_sounds_bin_start);
     if (bank_bytes != SND_BANK_BYTES) { ESP_LOGW(TAG, "bank is %u bytes, sounds.h says %u: rebuild (tools/make_sounds.py build) - silent", (unsigned)bank_bytes, (unsigned)SND_BANK_BYTES); return false; }
     if (!codec_port_present()) { ESP_LOGW(TAG, "no ES8311: silent"); return false; }
+#ifndef CONFIG_POCKET_TANK_SZPI
     gpio_config_t io = { .pin_bit_mask = 1ULL << PIN_AMP_EN, .mode = GPIO_MODE_OUTPUT, .pull_down_en = GPIO_PULLDOWN_ENABLE };
-    gpio_config(&io); amp(false);
+    gpio_config(&io);
+#endif
+    amp(false);
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     cc.dma_desc_num = 4; cc.dma_frame_num = BLOCK;
     if (i2s_new_channel(&cc, &s_tx, NULL) != ESP_OK) { ESP_LOGE(TAG, "no I2S channel"); return false; }

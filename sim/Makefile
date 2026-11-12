@@ -42,6 +42,7 @@ LDFLAGS := $(ARCH) $(SDL_LIBS) -lm
 APP_SRCS  := main.c selftest_link.c advisor_llm.c persist_port_sim.c net_port_sim.c ../common/tank.c ../common/update.c ../common/advanced.c ../common/shelf.c ../common/boot_show.c ../common/advisor.c ../common/render.c ../common/backgrounds.c ../common/icons.c ../common/progression.c ../common/setup.c ../common/audio.c ../common/notice.c ../common/sounds.c ../common/battery.c ../common/passport.c ../common/link.c ../common/tank_link.c ../common/collection.c ../common/gift.c ../common/llm/q4_model.c ../common/llm/word_tok.c ../common/llm/advisor_core.c
 
 APP_SRCS  += selftest_coll.c   # the visitor collection's pages (0.4)
+APP_SRCS  += ../common/ui_text.c ../common/zh_font.c
 APP_SRCS  += selftest_clock_gate.c   # the boot's TIME CHECK gate (0.4.1, common/clock_gate.h)
 APP_SRCS  += selftest_seam.c   # the 0.4.1 audit's link x progression soak (two tanks, two progressions)
 APP_SRCS  += selftest_touch.c  # the FIRMWARE's touch port built on the host (0.4.1): touchhost/ stands in for ESP-IDF

@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* update.c - over-the-air updates: the UPDATES page, update mode's pages and
  * the flow between them. See update.h and docs/OTA.md. */
 #include "update.h"
@@ -133,12 +134,24 @@ static const uint8_t ASCII5X7[95][7] = {
     { 0x08, 0x04, 0x04, 0x02, 0x04, 0x04, 0x08 }, /* } */
     { 0x00, 0x00, 0x08, 0x15, 0x02, 0x00, 0x00 }, /* ~ */
 };
-int update_text_w(const char *s, int scale) { int n = (int)strlen(s); return n ? n * 6 * scale - scale : 0; }
+int update_text_w(const char *s, int scale) { return ui_text_width(s, scale); }
 void update_text(uint16_t *fb, int stride, int x, int y, int scale, uint32_t rgb, const char *s) {
-    for (; *s; s++, x += 6 * scale) {
-        unsigned char ch = (unsigned char)*s;
-        if (ch < 32 || ch > 126) ch = '?';
-        render_glyph(fb, stride, x, y, scale, rgb, ASCII5X7[ch - 32]);
+#ifdef TANK_SZPI
+    render_text_case(fb, stride, x, y, scale, rgb, s);
+    return;
+#endif
+    while (*s) {
+        const char *start = s;
+        uint32_t ch = ui_utf8_next(&s);
+        if (ch >= 0x80) {
+            char character[5] = {0};
+            memcpy(character, start, (size_t)(s - start));
+            render_text(fb, stride, x, y, scale, rgb, character);
+        } else {
+            if (ch < 32 || ch > 126) ch = '?';
+            render_glyph(fb, stride, x, y, scale, rgb, ASCII5X7[ch - 32]);
+        }
+        x += ui_text_advance(ch, scale);
     }
 }
 static void text_c(uint16_t *fb, int stride, int y, int scale, uint32_t rgb, const char *s) {   /* the tank's font, centred */
@@ -169,33 +182,33 @@ void updates_page_open(void) { s_forget_armed = false; }
 bool updates_forget_armed(void) { return s_forget_armed; }
 void render_updates_page(uint16_t *fb, int stride) {
     page_bg(fb, stride);
-    text_c(fb, stride, 14, 3, C_TEXT, "UPDATES");
+    text_c(fb, stride, 14, 3, C_TEXT, "更新");
     char line[64];
-    snprintf(line, sizeof line, "VERSION %s %s", PT_RELEASE, PT_RELEASE_STAGE);
+    snprintf(line, sizeof line, "版本%s %s", PT_RELEASE, ui_zh_label(PT_RELEASE_STAGE));
     render_text(fb, stride, 32, 56, 2, C_TEXT, line);
-    snprintf(line, sizeof line, "BUILD %s", version_port_string());
+    snprintf(line, sizeof line, "构建%s", version_port_string());
     render_text(fb, stride, 32, 78, 2, C_QUIET, line);
     /* 0.4.1: the code a keeper gives Turbo (/crew add), and once the crew
        check said yes, the words say so (never the color alone) */
     char code[NET_CODE_LEN + 1];
     if (net_port_board_code(code)) {
-        const char *label = net_port_crew() ? "HATCHERY CREW" : "BOARD CODE";
+        const char *label = net_port_crew() ? "孵化小队" : "设备编号";
         render_text(fb, stride, 32, 100, 2, C_CAPT, label);
         render_text(fb, stride, 32 + render_text_w(label, 2) + 14, 100, 2, C_TEXT, code);
     }
     char ssid[NET_SSID_MAX + 1], pass[NET_PASS_MAX + 1];
     if (net_port_creds_get(ssid, pass)) {
-        render_text(fb, stride, 32, 126, 2, C_CAPT, "NETWORK");
-        update_text(fb, stride, 32 + render_text_w("NETWORK", 2) + 14, 126, 2, C_TEXT, ssid);
-    } else render_text(fb, stride, 32, 126, 2, C_CAPT, "NO NETWORK SAVED YET");
-    render_text(fb, stride, 32, 152, 2, C_QUIET, "WHILE UPDATING, THE BOARD");      /* Strato's words, 2026-11-04 */
-    render_text(fb, stride, 32, 174, 2, C_QUIET, "PAUSES AND REBOOTS ITSELF");
-    render_button(fb, stride, UPD_CHECK_X, UPD_CHECK_Y, UPD_CHECK_W, UPD_CHECK_H, C_GO, C_GO_E, "CHECK FOR UPDATES", 2);
+        render_text(fb, stride, 32, 126, 2, C_CAPT, "网络");
+        update_text(fb, stride, 32 + render_text_w("网络", 2) + 14, 126, 2, C_TEXT, ssid);
+    } else render_text(fb, stride, 32, 126, 2, C_CAPT, "尚未保存网络");
+    render_text(fb, stride, 32, 152, 2, C_QUIET, "更新期间鱼缸会暂停");      /* Strato's words, 2026-11-04 */
+    render_text(fb, stride, 32, 174, 2, C_QUIET, "完成后将自动重启");
+    render_button(fb, stride, UPD_CHECK_X, UPD_CHECK_Y, UPD_CHECK_W, UPD_CHECK_H, C_GO, C_GO_E, "检查更新", 2);
     if (net_port_creds_get(ssid, pass)) {
-        if (s_forget_armed) render_button(fb, stride, UPD_FORGET_X, UPD_FORGET_Y, UPD_FORGET_W, UPD_FORGET_H, C_GO, C_GO_E, "SURE?", 2);
-        else render_button(fb, stride, UPD_FORGET_X, UPD_FORGET_Y, UPD_FORGET_W, UPD_FORGET_H, C_INNER, C_DIM, "FORGET NETWORK", 2);
+        if (s_forget_armed) render_button(fb, stride, UPD_FORGET_X, UPD_FORGET_Y, UPD_FORGET_W, UPD_FORGET_H, C_GO, C_GO_E, "确定？", 2);
+        else render_button(fb, stride, UPD_FORGET_X, UPD_FORGET_Y, UPD_FORGET_W, UPD_FORGET_H, C_INNER, C_DIM, "忘记网络", 2);
     }
-    render_button(fb, stride, UPD_CLOSE_X, UPD_CLOSE_Y, UPD_CLOSE_W, UPD_CLOSE_H, C_INNER, C_EDGE, "CLOSE", 2);
+    render_button(fb, stride, UPD_CLOSE_X, UPD_CLOSE_Y, UPD_CLOSE_W, UPD_CLOSE_H, C_INNER, C_EDGE, "关闭", 2);
 }
 int updates_page_tap(float x, float y) {
     x -= PAGE_X; y -= PAGE_Y;                           /* the page's own coordinates (render.h) */
@@ -309,7 +322,7 @@ static void kb_key(int cell) {
     }
 }
 static void draw_keyboard(uint16_t *fb, int stride) {
-    static const char *const FK_LABEL[7] = { "MORE", "DEL", "", "CAPS", "123", "BACK", "JOIN" };
+    static const char *const FK_LABEL[7] = { "详情", "删除", "", "大写", "123", "返回", "连接" };
     for (int cell = 0; cell < UPD_KB_COLS * UPD_KB_ROWS; cell++) {
         int x = UPD_KB_X + (cell % UPD_KB_COLS) * UPD_KB_PX, y = UPD_KB_Y + (cell / UPD_KB_COLS) * UPD_KB_PY;
         if (cell < KB_CHARS) {
@@ -318,7 +331,7 @@ static void draw_keyboard(uint16_t *fb, int stride) {
             update_text(fb, stride, x + (UPD_KB_W - update_text_w(lbl, 3)) / 2, y + (UPD_KB_H - 21) / 2, 3, C_TEXT, lbl);
         } else {
             int fk = cell - KB_CHARS;
-            const char *lbl = fk == FK_MODE ? (s.kb_mode ? "ABC" : "123") : FK_LABEL[fk];
+            const char *lbl = fk == FK_MODE ? (s.kb_mode ? "字母" : "123") : FK_LABEL[fk];
             bool lit = (fk == FK_SHIFT && s.kb_caps && !s.kb_mode) || fk == FK_JOIN;
             bool dim = (fk == FK_SHIFT && s.kb_mode) || fk == FK_BACK;   /* BACK: rare, and it leaves the page - quieter */
             render_button(fb, stride, x, y, UPD_KB_W, UPD_KB_H, lit ? C_GO : dim ? C_KEY : C_INNER, dim ? C_DIM : lit ? C_GO_E : C_EDGE, lbl, 2);
@@ -371,10 +384,10 @@ static void busy(const char *title) {
     s.percent = -1;
     s.page = UPD_PG_BUSY; s.t = 0; s.hit = HIT_NONE;
 }
-static void start_scan(void)    { net_port_scan_start(); s.n_aps = 0; s.list_page = 0; go(STEP_SCANNING, UPD_PG_BUSY); busy("LOOKING FOR NETWORKS"); }
-static void start_connect(void) { net_port_connect_start(s.ssid, s.pass); go(STEP_CONNECTING, UPD_PG_BUSY); busy("CONNECTING TO"); }
-static void start_check(void)   { net_port_check_start(); s.have_m = false; go(STEP_CHECKING, UPD_PG_BUSY); busy("CHECKING FOR UPDATES"); }
-static void start_install(void) { net_port_install_start(); go(STEP_INSTALLING, UPD_PG_BUSY); busy("DOWNLOADING"); s.percent = 0; }
+static void start_scan(void)    { net_port_scan_start(); s.n_aps = 0; s.list_page = 0; go(STEP_SCANNING, UPD_PG_BUSY); busy("正在搜索网络"); }
+static void start_connect(void) { net_port_connect_start(s.ssid, s.pass); go(STEP_CONNECTING, UPD_PG_BUSY); busy("正在连接"); }
+static void start_check(void)   { net_port_check_start(); s.have_m = false; go(STEP_CHECKING, UPD_PG_BUSY); busy("正在检查更新"); }
+static void start_install(void) { net_port_install_start(); go(STEP_INSTALLING, UPD_PG_BUSY); busy("正在下载"); s.percent = 0; }
 static void leave(int outcome)  { s.outcome = outcome; s.step = STEP_NONE; }
 /* the keyboard, keeping what was typed for this network (a stray BACK or a
  * refused try must not cost a long passphrase); fresh = start empty */
@@ -420,19 +433,19 @@ const char *update_typed(void) { return s.pass; }
 
 static void fail(int err) {
     switch (err) {
-    case NET_ERR_NO_SIGNAL: message("NO SIGNAL", s.ssid, true, "IS NOT IN RANGE", "TRY AGAIN", ACT_RETRY_CONNECT, "OTHER NETWORK", ACT_SCAN); break;
-    case NET_ERR_PASSWORD:  message3("NOT ACCEPTED", s.ssid, true, "REFUSED THE PASSWORD. SOME ROUTERS",
-                                     "TRY AGAIN", ACT_RETRY_CONNECT, "TYPE IT AGAIN", ACT_RETYPE, "OTHER NETWORK", ACT_SCAN);
-                            snprintf(s.line2, sizeof s.line2, "REFUSE THE FIRST TRIES. TRY AGAIN?"); break;
-    case NET_ERR_NO_NET:    message("NO ANSWER", "THE UPDATE SERVER DID NOT", false, "ANSWER. IS THE INTERNET UP?", "TRY AGAIN", ACT_RETRY_CHECK, "OTHER NETWORK", ACT_SCAN); break;
-    case NET_ERR_BAD_MANIFEST: message("ODD ANSWER", "THE UPDATE SERVER SENT", false, "SOMETHING THIS TANK CANNOT READ", "TRY AGAIN", ACT_RETRY_CHECK, NULL, 0); break;
-    case NET_ERR_DOWNLOAD:  message("DOWNLOAD STOPPED", "NOTHING HAS CHANGED", false, "", "TRY AGAIN", ACT_RETRY_INSTALL, NULL, 0); break;
-    case NET_ERR_VERIFY:    message("NOT VERIFIED", "THE UPDATE WAS NOT SIGNED", false, "BY POCKET TANK. NOTHING CHANGED", NULL, 0, NULL, 0); break;
-    case NET_ERR_SPACE:     message("TOO BIG", "THE UPDATE DOES NOT FIT", false, "THIS TANK. NOTHING CHANGED", NULL, 0, NULL, 0); break;
-    case NET_ERR_ABORTED:   message("CANCELED", "NOTHING HAS CHANGED", false, "", NULL, 0, NULL, 0); break;
-    case NET_ERR_RADIO:     message("NO RADIO", "THE WI-FI RADIO DID NOT", false, "START. TRY AGAIN LATER", NULL, 0, NULL, 0); break;
-    case NET_ERR_BOARD:     message("WRONG BOARD", "THIS UPDATE IS FOR", false, "ANOTHER BOARD. NOTHING CHANGED", NULL, 0, NULL, 0); break;
-    default:                message("SOMETHING WENT WRONG", "NOTHING HAS CHANGED", false, "", "TRY AGAIN", ACT_SCAN, NULL, 0); break;
+    case NET_ERR_NO_SIGNAL: message("没有信号", s.ssid, true, "不在信号范围内", "重试", ACT_RETRY_CONNECT, "其他网络", ACT_SCAN); break;
+    case NET_ERR_PASSWORD:  message3("连接被拒绝", s.ssid, true, "密码被拒绝，部分路由器",
+                                     "重试", ACT_RETRY_CONNECT, "请重新输入", ACT_RETYPE, "其他网络", ACT_SCAN);
+                            snprintf(s.line2, sizeof s.line2, "初次连接可能失败，请重试"); break;
+    case NET_ERR_NO_NET:    message("没有响应", "更新服务器暂未响应", false, "请检查互联网连接", "重试", ACT_RETRY_CHECK, "其他网络", ACT_SCAN); break;
+    case NET_ERR_BAD_MANIFEST: message("响应异常", "服务器返回的信息", false, "暂时无法识别", "重试", ACT_RETRY_CHECK, NULL, 0); break;
+    case NET_ERR_DOWNLOAD:  message("下载已停止", "当前版本已保留", false, "", "重试", ACT_RETRY_INSTALL, NULL, 0); break;
+    case NET_ERR_VERIFY:    message("校验未通过", "更新签名不匹配", false, "当前固件已保留", NULL, 0, NULL, 0); break;
+    case NET_ERR_SPACE:     message("更新文件过大", "更新文件超出本板容量", false, "当前固件已保留", NULL, 0, NULL, 0); break;
+    case NET_ERR_ABORTED:   message("已取消", "当前版本已保留", false, "", NULL, 0, NULL, 0); break;
+    case NET_ERR_RADIO:     message("无线功能未启动", "无线网络启动失败", false, "请稍后重试", NULL, 0, NULL, 0); break;
+    case NET_ERR_BOARD:     message("板型不匹配", "这个更新适用于其他板型", false, "当前固件已保留", NULL, 0, NULL, 0); break;
+    default:                message("发生错误", "当前版本已保留", false, "", "重试", ACT_SCAN, NULL, 0); break;
     }
 }
 static void act(int a) {
@@ -467,7 +480,7 @@ void update_tick(float dt) {
         if (st == NET_DONE) {
             s.n_aps = net_port_scan_results(s.aps, NET_SCAN_MAX); s.list_page = 0;
             if (s.n_aps) go(STEP_LIST, UPD_PG_SCAN);
-            else message("NO NETWORKS", "NOTHING IN RANGE.", false, "IS THE ROUTER ON?", "LOOK AGAIN", ACT_SCAN, NULL, 0);
+            else message("未发现网络", "附近没有可用信号", false, "请确认路由器已开启", "重新搜索", ACT_SCAN, NULL, 0);
         } else if (st == NET_FAILED) fail(net_port_fail_reason());
         break;
     case STEP_CONNECTING:
@@ -483,10 +496,10 @@ void update_tick(float dt) {
         if (st == NET_DONE && m) {
             s.m = *m; s.have_m = true;
             if (strcmp(m->board, update_target_board()) != 0)   /* another board's manifest (2026-10-02): never offered */
-                message("WRONG BOARD", "THIS UPDATE IS FOR", false, "ANOTHER BOARD. NOTHING CHANGED", NULL, 0, NULL, 0);
-            else if (!crossgrade() && !newer(m)) { message("UP TO DATE", "YOUR TANK HAS THE LATEST", false, "VERSION", NULL, 0, NULL, 0); s.step = STEP_UP_TO_DATE; }
+                message("板型不匹配", "这个更新适用于其他板型", false, "当前固件已保留", NULL, 0, NULL, 0);
+            else if (!crossgrade() && !newer(m)) { message("已是最新版本", "当前鱼缸已安装最新", false, "版本", NULL, 0, NULL, 0); s.step = STEP_UP_TO_DATE; }
             else if (m->needs_cable || (min_from_num(m) && min_from_num(m) > (uint32_t)PT_RELEASE_NUM))
-                message("NEEDS THE CABLE", "THIS UPDATE IS INSTALLED", false, "FROM POCKETANK.COM/INSTALL", NULL, 0, NULL, 0);
+                message("需要通过数据线安装", "请使用数据线烧录", false, "安装适配本板的固件", NULL, 0, NULL, 0);
             else go(STEP_OFFER, UPD_PG_OFFER);
         } else if (st == NET_FAILED) fail(net_port_fail_reason());
         break; }
@@ -497,7 +510,7 @@ void update_tick(float dt) {
         int pct = s.percent;
         st = net_port_install_state(&pct);
         s.percent = pct;
-        if (st == NET_DONE) go(STEP_RESTART, UPD_PG_BUSY), busy("INSTALLED"), s.percent = 100;
+        if (st == NET_DONE) go(STEP_RESTART, UPD_PG_BUSY), busy("已安装"), s.percent = 100;
         else if (st == NET_FAILED) fail(net_port_fail_reason());
         break; }
     case STEP_RESTART:
@@ -546,8 +559,8 @@ int update_hit(float x, float y) {
 const char *update_hit_name(int id) {
     static char buf[24];
     switch (id) {
-    case HIT_NONE: return "none"; case HIT_BACK: return "BACK TO TANK"; case HIT_CANCEL: return "CANCEL";
-    case HIT_RESCAN: return "SCAN AGAIN"; case HIT_YES: return "UPDATE"; case HIT_NO: return "NOT NOW";
+    case HIT_NONE: return "无"; case HIT_BACK: return "返回鱼缸"; case HIT_CANCEL: return "取消";
+    case HIT_RESCAN: return "重新扫描"; case HIT_YES: return "更新"; case HIT_NO: return "暂不更新";
     case HIT_PRIMARY: return s.primary ? s.primary : "primary"; case HIT_SECONDARY: return s.secondary ? s.secondary : "secondary";
     case HIT_TERTIARY: return s.tertiary ? s.tertiary : "tertiary";
     case HIT_PG_UP: return "page up"; case HIT_PG_DOWN: return "page down";
@@ -641,44 +654,43 @@ static void wrap2(const char *src, char *l1, char *l2, size_t cap) {   /* two li
     if (n <= lim) { snprintf(l1, cap, "%s", src); l2[0] = 0; return; }
     size_t cut = lim;
     while (cut > 0 && src[cut] != ' ') cut--;
-    if (!cut) cut = lim;
+    if (!cut) cut = ui_text_fit_bytes(src, 0x3fffffff, 1, lim);
     snprintf(l1, cap, "%.*s", (int)cut, src);
     const char *rest = src + cut; while (*rest == ' ') rest++;
-    snprintf(l2, cap, "%s", rest);
-    if (strlen(rest) > lim) { l2[lim - 3] = '.'; l2[lim - 2] = '.'; l2[lim - 1] = '.'; l2[lim] = 0; }
+    ui_text_copy(l2, cap, rest);
 }
 void render_clock_sync(uint16_t *fb, int stride, double clock) {   /* the loading screen's look (10-31): the tank's WAKING THE TANK follows on the same water */
-    render_loading(fb, stride, "WAKING UP", clock, "CHECKING THE TIME");
+    render_loading(fb, stride, "正在唤醒", clock, "正在校准时间");
 }
 void render_update(uint16_t *fb, int stride, double clock) {
     page_bg(fb, stride);
     char line[80];
     switch (s.page) {
     case UPD_PG_POWER:
-        text_c(fb, stride, 96, 3, C_TEXT, "PLUG IN TO UPDATE");
-        snprintf(line, sizeof line, "THE BATTERY IS AT %d%%", s.battery_pct);
+        text_c(fb, stride, 96, 3, C_TEXT, "请接通电源后更新");
+        snprintf(line, sizeof line, "当前电量%d%%", s.battery_pct);
         text_c(fb, stride, 150, 2, C_CAPT, line);
-        text_c(fb, stride, 176, 2, C_QUIET, "AN UPDATE NEEDS THE CABLE IN");
-        render_button(fb, stride, UPD_BTN_MID_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "BACK TO TANK", 2);
+        text_c(fb, stride, 176, 2, C_QUIET, "更新时请保持电源连接");
+        render_button(fb, stride, UPD_BTN_MID_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "返回鱼缸", 2);
         break;
     case UPD_PG_BUSY:
         text_c(fb, stride, 96, 3, C_TEXT, s.title);
         if (s.step == STEP_CONNECTING) atext_c(fb, stride, 134, 2, C_CAPT, s.ssid);
         else if (s.step == STEP_INSTALLING || s.step == STEP_RESTART) {
-            snprintf(line, sizeof line, "VERSION %s", s.m.release); text_c(fb, stride, 134, 2, C_CAPT, line);
+            snprintf(line, sizeof line, "版本%s", s.m.release); text_c(fb, stride, 134, 2, C_CAPT, line);
         }
         if (s.percent >= 0) {                                 /* the bar */
             const int BX = 64, BW = 320, BY = 196, BH = 16;
             render_rect(fb, stride, BX, BY, BW, BH, C_INNER); render_rect_edge(fb, stride, BX, BY, BW, BH, C_DIM);
             render_rect(fb, stride, BX + 2, BY + 2, (BW - 4) * s.percent / 100, BH - 4, C_EDGE);
             snprintf(line, sizeof line, "%d%%", s.percent); text_c(fb, stride, BY + 26, 2, C_TEXT, line);
-            if (s.step == STEP_RESTART) text_c(fb, stride, 252, 2, C_CAPT, "RESTARTING");
-            else text_c(fb, stride, 252, 2, C_QUIET, "KEEP THE TANK ON");
+            if (s.step == STEP_RESTART) text_c(fb, stride, 252, 2, C_CAPT, "正在重启");
+            else text_c(fb, stride, 252, 2, C_QUIET, "请保持鱼缸通电");
         } else spinner(fb, stride, CX, 214, clock);
-        if (s.step != STEP_RESTART) render_button(fb, stride, UPD_BTN_MID_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "CANCEL", 2);
+        if (s.step != STEP_RESTART) render_button(fb, stride, UPD_BTN_MID_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "取消", 2);
         break;
     case UPD_PG_SCAN: {
-        text_c(fb, stride, 22, 2, C_CAPT, "CHOOSE YOUR NETWORK");
+        text_c(fb, stride, 22, 2, C_CAPT, "选择你的网络");
         int pages = (s.n_aps + UPD_ROWS_PER - 1) / UPD_ROWS_PER;
         for (int r = 0; r < UPD_ROWS_PER; r++) {
             int i = s.list_page * UPD_ROWS_PER + r; if (i >= s.n_aps) break;
@@ -687,7 +699,7 @@ void render_update(uint16_t *fb, int stride, double clock) {
             render_rect_edge(fb, stride, UX, y, UW - (pages > 1 ? 36 : 0), UPD_ROW_H - 4, C_INNER);
             update_text(fb, stride, UX + 12, y + (UPD_ROW_H - 4 - 14) / 2, 2, C_TEXT, s.aps[i].ssid);
             signal_bars(fb, stride, UX + UW - (pages > 1 ? 36 : 0) - 44, y + 8, s.aps[i].rssi);
-            if (!s.aps[i].secured) render_text(fb, stride, UX + UW - (pages > 1 ? 36 : 0) - 44 - 8 - render_text_w("OPEN", 1), y + 12, 1, C_QUIET, "OPEN");
+            if (!s.aps[i].secured) render_text(fb, stride, UX + UW - (pages > 1 ? 36 : 0) - 44 - 8 - render_text_w("开放网络", 1), y + 12, 1, C_QUIET, "开放网络");
         }
         if (pages > 1) {                                       /* chevrons and pips on the right */
             int cx = UPD_ARROW_X + 4;
@@ -695,44 +707,44 @@ void render_update(uint16_t *fb, int stride, double clock) {
             for (int i = 0; i < 4; i++) { render_rect(fb, stride, cx - 3 - i * 3, UPD_ROW_Y0 + UPD_ROWS_PER * UPD_ROW_H - 30 - i * 3, 3, 3, s.list_page < pages - 1 ? C_EDGE : C_DIM); render_rect(fb, stride, cx + i * 3, UPD_ROW_Y0 + UPD_ROWS_PER * UPD_ROW_H - 30 - i * 3, 3, 3, s.list_page < pages - 1 ? C_EDGE : C_DIM); }
             for (int i = 0; i < pages; i++) render_rect(fb, stride, cx - 1, UPD_ROW_Y0 + UPD_ROWS_PER * UPD_ROW_H / 2 - pages * 4 + i * 8, 4, 4, i == s.list_page ? C_EDGE : C_DIM);
         }
-        render_button(fb, stride, UPD_BTN_L_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "BACK TO TANK", 2);
-        render_button(fb, stride, UPD_BTN_R_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "SCAN AGAIN", 2);
+        render_button(fb, stride, UPD_BTN_L_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "返回鱼缸", 2);
+        render_button(fb, stride, UPD_BTN_R_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "重新扫描", 2);
         break; }
     case UPD_PG_PASSWORD:
-        render_text(fb, stride, UX + (PAGE_BOWL ? 30 : 0), 22, 2, C_CAPT, "PASSWORD FOR");
-        update_text(fb, stride, UX + (PAGE_BOWL ? 30 : 0) + render_text_w("PASSWORD FOR", 2) + 12, 22, 2, C_TEXT, s.ssid);
+        render_text(fb, stride, UX + (PAGE_BOWL ? 30 : 0), 22, 2, C_CAPT, "输入网络密码");
+        update_text(fb, stride, UX + (PAGE_BOWL ? 30 : 0) + render_text_w("输入网络密码", 2) + 12, 22, 2, C_TEXT, s.ssid);
         draw_field(fb, stride, clock);
         draw_keyboard(fb, stride);
         break;
     case UPD_PG_OFFER: {
         const char *own = crossgrade() ? pt_board_words(update_target_board()) : NULL;   /* this board's own version (0.3.9.3) */
-        if (own) snprintf(line, sizeof line, "%s VERSION", own);
-        text_c(fb, stride, 52, 3, C_TEXT, own ? line : "UPDATE READY");
+        if (own) snprintf(line, sizeof line, "%s版本", own);
+        text_c(fb, stride, 52, 3, C_TEXT, own ? line : "更新已就绪");
         uint32_t bytes = s.m.app_size + (s.m.model_offered ? s.m.model_size : 0);
-        snprintf(line, sizeof line, "VERSION %s %s, %.1f MB", s.m.release, PT_RELEASE_STAGE, bytes / 1048576.0);
+        snprintf(line, sizeof line, "版本%s %s，%.1f MB", s.m.release, ui_zh_label(PT_RELEASE_STAGE), bytes / 1048576.0);
         text_c(fb, stride, 92, 2, C_CAPT, line);
         char l1[32], l2[32];
-        if (own) { snprintf(l1, sizeof l1, "MADE FOR THIS BOARD"); snprintf(l2, sizeof l2, "YOUR FISH STAY"); }
+        if (own) { snprintf(l1, sizeof l1, "适配当前开发板"); snprintf(l2, sizeof l2, "鱼儿存档将保留"); }
         else wrap2(s.m.note, l1, l2, sizeof l1);
         text_c(fb, stride, 138, 2, C_TEXT, l1);
         if (l2[0]) text_c(fb, stride, 160, 2, C_TEXT, l2);
         int secs = (int)(bytes / 120000) + 10;
-        if (secs < 90) snprintf(line, sizeof line, "IT TAKES ABOUT A MINUTE");
-        else snprintf(line, sizeof line, "IT TAKES ABOUT %d MINUTES", (secs + 30) / 60);
+        if (secs < 90) snprintf(line, sizeof line, "大约需要一分钟");
+        else snprintf(line, sizeof line, "大约需要%d分钟", (secs + 30) / 60);
         text_c(fb, stride, 208, 2, C_QUIET, line);
-        text_c(fb, stride, 230, 2, C_QUIET, "THE TANK RESTARTS BY ITSELF");
+        text_c(fb, stride, 230, 2, C_QUIET, "完成后将自动重启");
         {   /* HOLD TO UPDATE (Strato 11-06): the fill grows across the button as the finger stays, as REMOVE's HOLD TO SELL */
-            const char *lb = "HOLD TO UPDATE";
+            const char *lb = "长按开始更新";
             float f = s.holding ? (s.t - s.hold_t0) / UPD_HOLD_S : 0; if (f > 1) f = 1;
             render_rect(fb, stride, UPD_BTN_L_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_GO);
             if (f > 0) render_rect(fb, stride, UPD_BTN_L_X, UPD_BTN_Y, (int)(UPD_BTN_W * f), UPD_BTN_H, C_FILL);
             render_rect_edge(fb, stride, UPD_BTN_L_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_GO_E);
             if (PAGE_BOWL) {                                 /* (the bowl's button is narrower: two lines, Strato 11-06) */
-                render_text(fb, stride, UPD_BTN_L_X + (UPD_BTN_W - render_text_w("HOLD TO", 2)) / 2, UPD_BTN_Y + 3, 2, C_TEXT, "HOLD TO");
-                render_text(fb, stride, UPD_BTN_L_X + (UPD_BTN_W - render_text_w("UPDATE", 2)) / 2, UPD_BTN_Y + UPD_BTN_H - 17, 2, C_TEXT, "UPDATE");
+                render_text(fb, stride, UPD_BTN_L_X + (UPD_BTN_W - render_text_w("长按", 2)) / 2, UPD_BTN_Y + 3, 2, C_TEXT, "长按");
+                render_text(fb, stride, UPD_BTN_L_X + (UPD_BTN_W - render_text_w("更新", 2)) / 2, UPD_BTN_Y + UPD_BTN_H - 17, 2, C_TEXT, "更新");
             } else render_text(fb, stride, UPD_BTN_L_X + (UPD_BTN_W - render_text_w(lb, 2)) / 2, UPD_BTN_Y + (UPD_BTN_H - 14) / 2, 2, C_TEXT, lb);
         }
-        render_button(fb, stride, UPD_BTN_R_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "NOT NOW", 2);
+        render_button(fb, stride, UPD_BTN_R_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "暂不更新", 2);
         break; }
     case UPD_PG_CALIB: {
         int tx, ty, i = update_calib_target(&tx, &ty);
@@ -740,7 +752,7 @@ void render_update(uint16_t *fb, int stride, double clock) {
         tx -= PAGE_X; ty -= PAGE_Y;                      /* drawn on the page */
         render_rect(fb, stride, tx - 24, ty - 1, 49, 3, C_EDGE); render_rect(fb, stride, tx - 1, ty - 24, 3, 49, C_EDGE);
         render_rect(fb, stride, tx - 4, ty - 4, 9, 9, C_TEXT);
-        snprintf(line, sizeof line, "TAP THE CROSS  %d OF 9", i + 1);
+        snprintf(line, sizeof line, "点击十字 %d/9", i + 1);
         text_c(fb, stride, ty < PAGE_H / 2 ? PAGE_H - 60 : 46, 2, C_CAPT, line);
         break; }
     case UPD_PG_MESSAGE: {
@@ -748,7 +760,7 @@ void render_update(uint16_t *fb, int stride, double clock) {
         if (s.line1_ascii) atext_c(fb, stride, 130, 2, C_CAPT, s.line1); else text_c(fb, stride, 130, 2, C_CAPT, s.line1);
         if (s.line2[0]) text_c(fb, stride, 152, 2, C_CAPT, s.line2);
         if (s.step == STEP_UP_TO_DATE) {
-            snprintf(line, sizeof line, "VERSION %s %s", PT_RELEASE, PT_RELEASE_STAGE); text_c(fb, stride, 186, 2, C_QUIET, line);
+            snprintf(line, sizeof line, "版本%s %s", PT_RELEASE, ui_zh_label(PT_RELEASE_STAGE)); text_c(fb, stride, 186, 2, C_QUIET, line);
             float left = 1.0f - s.t / UPD_UP_TO_DATE_S; if (left < 0) left = 0;
             render_rect(fb, stride, UX, 220, (int)(UW * left), 2, C_INNER);
         }
@@ -756,14 +768,14 @@ void render_update(uint16_t *fb, int stride, double clock) {
         if (s.primary)   render_button(fb, stride, primary_x(), by, UPD_BTN_W, UPD_BTN_H, C_GO, C_GO_E, s.primary, 2);
         if (s.secondary) render_button(fb, stride, UPD_BTN_R_X, by, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, s.secondary, 2);
         if (s.tertiary)  render_button(fb, stride, UPD_BTN_L_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, s.tertiary, 2);
-        render_button(fb, stride, s.tertiary ? UPD_BTN_R_X : UPD_BTN_MID_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "BACK TO TANK", 2);
+        render_button(fb, stride, s.tertiary ? UPD_BTN_R_X : UPD_BTN_MID_X, UPD_BTN_Y, UPD_BTN_W, UPD_BTN_H, C_INNER, C_EDGE, "返回鱼缸", 2);
         break; }
     default: break;
     }
 }
 
 const char *net_err_name(int err) {
-    static const char *const N[] = { "none", "no signal", "wrong password", "no answer from the server", "bad manifest",
-                                     "download stopped", "not verified", "too big", "canceled", "no radio" };
+    static const char *const N[] = { "无", "没有无线信号", "无线密码错误", "服务器未响应", "更新清单无效",
+                                     "下载已中断", "固件校验失败", "固件过大", "已取消", "无线功能不可用" };
     return err >= 0 && err < (int)(sizeof N / sizeof N[0]) ? N[err] : "?";
 }

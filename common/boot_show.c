@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* boot_show.c - THE BOOT SHOW (2026-10-31). A long sleep ends in a restart, and a tank's first seconds after any start
  * or a SWAP IN go to baking its grass loop. Machito asked on Discord why a wake said FILLING THE TANK; mysiak: "show an
  * empty tank, and decorations with inhabitants would materialise as they are loaded". Strato saw the sim's mock-ups

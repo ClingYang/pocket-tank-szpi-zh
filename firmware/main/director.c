@@ -43,12 +43,38 @@ bool net_port_set_manifest_url(const char *url);
 #include "shelf.h"
 #include "render.h"
 #include "esp_random.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#ifdef CONFIG_POCKET_TANK_SZPI
+#include "driver/uart.h"
+#include "board_szpi.h"
+#endif
 #include "gift.h"
 #if CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED
 #include "driver/usb_serial_jtag.h"
 #endif
 
 static const char *TAG = "director";
+void device_frame_stats(bool reset);
+void device_profile_logs(bool on);
+#if CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED
+static int console_read(uint8_t *data, size_t length) {
+#ifdef CONFIG_POCKET_TANK_SZPI
+    return uart_read_bytes(UART_NUM_0, data, length, 0);
+#else
+    return usb_serial_jtag_read_bytes(data, length, 0);
+#endif
+}
+
+static int console_write(const uint8_t *data, size_t length) {
+#ifdef CONFIG_POCKET_TANK_SZPI
+    return uart_write_bytes(UART_NUM_0, data, length);
+#else
+    return usb_serial_jtag_write_bytes(data, length, pdMS_TO_TICKS(50));
+#endif
+}
+#endif
 static void *pk_alloc(size_t n) { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }   /* (pkcheck's scratch frame) */
 static void pk_free(void *p) { heap_caps_free(p); }
 
@@ -360,6 +386,30 @@ static void run(tank_t *t, char *line) {
         ESP_LOGW(TAG, "update mode: only wifi / ota / help (ota tap <x> <y>, ota page)"); return; }
     if (!strcmp(c, "help")) help();
     else if (!strcmp(c, "state")) show_state(t);
+    else if (!strcmp(c, "fps")) device_frame_stats(argc > 1 && !strcmp(argv[1], "reset"));
+    else if (!strcmp(c, "profile")) {
+        if (argc != 2 || (strcmp(argv[1], "on") && strcmp(argv[1], "off"))) {
+            ESP_LOGW(TAG, "profile on|off");
+            return;
+        }
+        device_profile_logs(!strcmp(argv[1], "on"));
+    }
+#ifdef CONFIG_POCKET_TANK_SZPI
+    else if (!strcmp(c, "lcd")) {
+        if (argc != 3 || !display_szpi_configure(atoi(argv[1]), atoi(argv[2]))) {
+            ESP_LOGW(TAG, "lcd <SPI mode 0..3> <clock MHz 1..80>");
+            return;
+        }
+        display_port_probe(true);
+    }
+#endif
+    else if (!strcmp(c, "reboot")) {
+        progression_save(t);
+        ESP_LOGI(TAG, "saved; restarting");
+        fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        esp_restart();
+    }
     else if (!strcmp(c, "ids")) show_ids(t);
     else if (!strcmp(c, "wifi")) {                            /* the saved network (docs/OTA.md) */
         char ssid[NET_SSID_MAX + 1], pass[NET_PASS_MAX + 1];
@@ -1251,7 +1301,7 @@ static void improv_send(uint8_t type, const uint8_t *data, int n) {
     uint8_t sum = 0; for (int i = 1; i < k; i++) sum += p[i];
     p[k++] = sum;
     p[k++] = '\n';
-    int wrote = s_ok ? usb_serial_jtag_write_bytes(p, k, pdMS_TO_TICKS(50)) : -1;
+    int wrote = s_ok ? console_write(p, k) : -1;
     imp_ev(wrote == k ? 'T' : 'F', type, n ? data[0] : 0);   /* 'F': the driver did not take the whole packet */
 #else
     (void)type; (void)data; (void)n;
@@ -1405,8 +1455,13 @@ static bool improv_feed(uint8_t ch) {
 void director_init(void) {
 #if CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED
     if (s_ok) return;                                        /* update mode brought it up already */
+#ifdef CONFIG_POCKET_TANK_SZPI
+    s_ok = uart_is_driver_installed(UART_NUM_0) ||
+           uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0) == ESP_OK;
+#else
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     s_ok = usb_serial_jtag_driver_install(&cfg) == ESP_OK;
+#endif
     ESP_LOGI(TAG, "%s", s_ok ? "console ready (type help)" : "USB serial driver failed: console off");
     if (nvs_has("bk")) ESP_LOGW(TAG, "a STAGED tank is up: the real tank is parked (restore brings it back)");
     improv_state();                                          /* the installer page listens for this after a flash */
@@ -1429,7 +1484,7 @@ static void early_task(void *arg) {
     (void)arg;
     uint8_t buf[32]; int n;
     while (s_early_run) {
-        while ((n = usb_serial_jtag_read_bytes(buf, sizeof buf, 0)) > 0)
+        while ((n = console_read(buf, sizeof buf)) > 0)
             for (int i = 0; i < n; i++) improv_feed(buf[i]);   /* a command typed this early is dropped */
         vTaskDelay(pdMS_TO_TICKS(15));
     }
@@ -1456,7 +1511,7 @@ void director_poll(tank_t *t) {
     if (s_early_run) { s_early_run = false; while (s_early) vTaskDelay(1); imp_ev('H', t != NULL, 0); }   /* the boot's Improv task hands over */
     s_imp_tank = t != NULL;
     uint8_t buf[32]; int n;
-    while ((n = usb_serial_jtag_read_bytes(buf, sizeof buf, 0)) > 0) {
+    while ((n = console_read(buf, sizeof buf)) > 0) {
         for (int i = 0; i < n; i++) {
             char ch = (char)buf[i];
             if (improv_feed(buf[i])) continue;              /* an Improv packet from the installer page */

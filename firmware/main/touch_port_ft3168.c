@@ -49,6 +49,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <math.h>
+#ifdef CONFIG_POCKET_TANK_SZPI
+#include "board_szpi.h"
+#endif
 
 static const char *TAG = "touch";
 static esp_lcd_touch_handle_t s_tp;
@@ -95,7 +98,11 @@ static int  s_q;                                  /* the picture's quarter turns
  * same reason; Strato saw it on the swatch rows, 2026-09-13). Reported
  * points move UP by this many px in displayed space; director `touch bias
  * <px>` tunes it live. */
+#ifdef CONFIG_POCKET_TANK_SZPI
+static int s_bias_y = 0;
+#else
 static int s_bias_y = 10;
+#endif
 void touch_port_set_bias(int px) { s_bias_y = px; }
 int  touch_port_bias(void) { return s_bias_y; }
 
@@ -279,6 +286,25 @@ static bool panel_read(uint16_t *x, uint16_t *y) {
 }
 
 bool touch_port_init(void) {
+#ifdef CONFIG_POCKET_TANK_SZPI
+    if (!board_i2c_bus()) return false;
+    esp_lcd_panel_io_handle_t io;
+    esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
+    io_cfg.scl_speed_hz = 400000;
+    if (esp_lcd_new_panel_io_i2c(board_i2c_bus(), &io_cfg, &io) != ESP_OK) return false;
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = 240, .y_max = 320, .rst_gpio_num = -1, .int_gpio_num = -1,
+        .flags = { .swap_xy = true, .mirror_x = true },
+    };
+    esp_err_t err = esp_lcd_touch_new_i2c_ft5x06(io, &tp_cfg, &s_tp);
+    if (err != ESP_OK) {
+        esp_lcd_panel_io_del(io);
+        ESP_LOGE(TAG, "FT5x06 init failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "SZPI FT5x06 ready");
+    return true;
+#else
     if (board_is_round() || board_is_square()) return cst9217_init();
     if (board_is_watch()) return ft3168_init();
     esp_lcd_panel_io_handle_t io;
@@ -294,6 +320,7 @@ bool touch_port_init(void) {
     if (err != ESP_OK) { ESP_LOGW(TAG, "no %s", v2 ? "CST816" : "FT3168"); return false; }
     ESP_LOGI(TAG, "%s ready", v2 ? "CST816" : "FT3168");
     return true;
+#endif
 }
 
 /* panel -> tank space, CALIBRATED (2026-09-30). Nine crosshairs on Strato's
@@ -445,6 +472,12 @@ static void map_touch(uint16_t px, uint16_t py, float *tx, float *ty) {
         float fx, fy; display_port_panel_to_tank(px, py, &fx, &fy);
         rx = (int)fx; ry = (int)fy;
     }
+#ifdef CONFIG_POCKET_TANK_SZPI
+    float mapped_x, mapped_y;
+    display_port_panel_to_tank(px, py, &mapped_x, &mapped_y);
+    rx = (int)mapped_x;
+    ry = (int)mapped_y;
+#endif
     if (rx < s_raw_x0) s_raw_x0 = rx;
     if (rx > s_raw_x1) s_raw_x1 = rx;
     if (ry < s_raw_y0) s_raw_y0 = ry;

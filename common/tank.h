@@ -21,6 +21,12 @@
 #include <stdint.h>
 #include <math.h>
 
+#ifdef TANK_SZPI
+/* A 4:3 scene maps uniformly to the board's 320x240 panel. */
+#define TANK_W 480
+#define TANK_H 360
+#endif
+
 #ifdef TANK_ROUND               /* the round 466 px glass (Waveshare 1.75C, 2026-10-01): the frame is the square around a bowl */
 #define TANK_W 466
 #define TANK_H 466
@@ -99,7 +105,11 @@ void  tank_glass_clamp(float *x, float *y, float m);   /* (x,y) brought to at le
 #ifdef POP_CAP
 #error "POP_CAP is the keeper's cap, 5 on every build: tank.h defines it, nothing else"
 #endif
+#ifdef TANK_SZPI
+#define POP_CAP 3
+#else
 #define POP_CAP 5
+#endif
 #if POP_CAP >= N_FISH_MAX
 #error "a fry is born into the slot past the cap before it goes to its home: N_FISH_MAX must stay above POP_CAP"
 #endif
@@ -203,7 +213,11 @@ typedef enum { VEG_KIND_GRASS, VEG_KIND_SWORD } veg_kind_t;
                                                 * of the tallest frond touches y~10,
                                                 * just under the surface (render.c
                                                 * VEG_SEG_DY 3.2 px pitch from y=352) */
-#ifdef TANK_ROUND                              /* the bowl: 26 x 22 cells of 18 px over the circle down to TANK_BOT -
+#ifdef TANK_SZPI
+#define ALGAE_CELL 20
+#define ALGAE_COLS 24
+#define ALGAE_ROWS 18
+#elif defined(TANK_ROUND)                      /* the bowl: 26 x 22 cells of 18 px over the circle down to TANK_BOT -
                                                 * 572, inside the 644 the save keeps (progression.c) */
 #define ALGAE_CELL 18
 #define ALGAE_COLS 26
@@ -334,11 +348,13 @@ typedef struct {
     int    preset;          /* roster index (colors, base size, temperament) */
     float x, y;
     float heading;          /* radians */
+    float steering_velocity; /* runtime angular inertia, not part of the save format */
     float yaw;              /* which way it faces, -1 (left) .. +1 (right), seen
                              * from the side: a U-turn swings it through 0 (the
                              * fish head-on) and the swim follows it. Not saved. */
     float yaw_tail;         /* the tail's yaw, a beat behind the head's: mid-turn
                              * the body bends (render.c draws both) */
+    float yaw_velocity;     /* runtime head-turn spring velocity */
     /* the trail (0.4, Strato 11-02: a long fish "moves with it on the pivot
      * point faster than would be possible in water"): the body's pitch as
      * drawn, the tail's - a spring behind it, so a long tail keeps its way

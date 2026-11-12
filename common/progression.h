@@ -228,9 +228,9 @@ enum { FRY_REQ_TRUST, FRY_REQ_FEED, FRY_REQ_HOLD, FRY_REQ_GROW, FRY_REQ_CHANGE, 
 #define FRY_REQ_MAX 5
 typedef struct {
     int   kind;
-    char  title[12];
-    char  words[28], words2[28];   /* what to do, a plain sentence over two lines */
-    char  progress[28];            /* where it stands */
+    char  title[32];
+    char  words[64], words2[64];   /* UTF-8 presentation strings, separate from persisted state. */
+    char  progress[64];
     float frac;
     bool  met;
 } fry_req_t;

@@ -48,7 +48,8 @@
 #include "cJSON.h"
 #include "esp_mac.h"
 #include "esp_random.h"
-#include "mbedtls/sha256.h"
+#include "sha256_port.h"
+#include "esp_idf_version.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -134,7 +135,7 @@ bool net_port_board_code(char out[NET_CODE_LEN + 1]) {
     esp_read_mac(seed, ESP_MAC_WIFI_STA);
     esp_fill_random(seed + 6, 32);
     int64_t t = esp_timer_get_time(); memcpy(seed + 38, &t, sizeof t);
-    mbedtls_sha256(seed, sizeof seed, h, 0);
+    if (!sha256_port(seed, sizeof seed, h)) { s_code_st = -1; return false; }
     static const char A[] = NET_CODE_ALPHABET;
     for (int i = 0, k = 0; i < NET_CODE_LEN; i++) out[i] = i == 4 ? '-' : A[h[k++] % (sizeof A - 1)];
     out[NET_CODE_LEN] = 0;
@@ -304,7 +305,11 @@ static void do_connect_n(int attempts, int wait_ms, int64_t deadline_us, bool bo
         ESP_LOGW(TAG, "connect attempt %d%s: %s (reason %d)", attempt + 1, chan ? " (learned channel)" : "", b & EV_DISCONNECTED ? "disconnected" : "timed out", r);
         if (r == WIFI_REASON_NO_AP_FOUND && !boot) { err = NET_ERR_NO_SIGNAL; break; }
         if (r == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT || r == WIFI_REASON_AUTH_FAIL || r == WIFI_REASON_HANDSHAKE_TIMEOUT
-            || r == WIFI_REASON_AUTH_EXPIRE || r == WIFI_REASON_ASSOC_EXPIRE || r == WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY
+            || r == WIFI_REASON_AUTH_EXPIRE
+#if ESP_IDF_VERSION_MAJOR < 6
+            || r == WIFI_REASON_ASSOC_EXPIRE
+#endif
+            || r == WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY
             || r == WIFI_REASON_CONNECTION_FAIL) err = NET_ERR_PASSWORD;
         else err = NET_ERR_NO_SIGNAL;
         if (chan) { esp_wifi_disconnect(); chan = 0; sta_config(0); }   /* the learned channel missed: sweep them all from here */
@@ -469,7 +474,8 @@ static void crew_check(char *manifest, size_t cap, char *buf, int bufcap) {
     manifest[0] = 0;
     char code[NET_CODE_LEN + 1];
     if (!net_port_board_code(code)) return;
-    uint8_t h[32]; mbedtls_sha256((const uint8_t *)code, NET_CODE_LEN, h, 0);
+    uint8_t h[32];
+    if (!sha256_port(code, NET_CODE_LEN, h)) return;
     char url[NET_URL_MAX + 1], hex[65];
     for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
     snprintf(url, sizeof url, CREW_CHECK_URL "?b=%s&c=%s", update_target_board(), hex);

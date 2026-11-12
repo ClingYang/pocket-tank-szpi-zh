@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* backgrounds.c - THE BACKGROUNDS (0.4.1; backgrounds.h says what they are, docs/backgrounds-0.4.1.md why).
  *
  * Every look here was approved on the sim's renders first (2026-11-04, the mock-ups in wt-backdrop): Sunken
@@ -33,18 +34,18 @@ static const bg_water_t BG_W[BG_N] = {
     [BG_REEF]     = { 0x0d4b54, 0x0a3138, 0x041417, 0.50f, 0.50f },
     [BG_GROTTO]   = { 0x0b3d48, 0x08272f, 0x031015, 0.45f, 0.55f },
 };
-static const char *const BG_NAME[BG_N] = { "OPEN WATER", "ATLANTIS", "KELP FOREST", "TWILIGHT DEEP", "LAGOON", "ROCK RIDGES", "REEF WALLS", "GROTTO" };
+static const char *const BG_NAME[BG_N] = { "开阔水域", "失落古城", "海带森林", "暮色深海", "潟湖", "岩石山脊", "珊瑚石壁", "海底洞穴" };
 static const uint8_t BG_LAYERS[BG_N] = { 0, 5, 2, 0, 1, 5, 5, 2 };
 const char *bg_name(int bg) { return (unsigned)bg < BG_N ? BG_NAME[bg] : BG_NAME[0]; }
 static const char *const BG_WORDS[BG_N][2] = {     /* (approved by Strato 11-05) */
-    { "THE TANK AS IT STARTED,", "CLEAR OPEN WATER" },
-    { "OLD STONE COLUMNS,", "A TEMPLE LONG UNDER WATER" },
-    { "A FOREST OF TALL KELP", "IN GREEN WATER" },
-    { "DEEP BLUE WATER, A GLOW", "AND DRIFTING SPECKS" },
-    { "BRIGHT SHALLOW WATER", "AND A SANDY SLOPE" },
-    { "RIDGE AFTER RIDGE OF ROCK", "FADING INTO THE DEEP" },
-    { "CORAL ON ROCKY WALLS,", "OPEN WATER BETWEEN" },
-    { "LOOK OUT OF A CAVE", "INTO THE OPEN SEA" },
+    { "鱼缸最初的模样", "清澈开阔的水域" },
+    { "古老的石柱", "沉睡水下的神殿" },
+    { "高高的海带森林", "生长于碧绿水中" },
+    { "幽深蓝水与微光", "点点浮尘缓缓漂游" },
+    { "明亮的浅水", "与柔和的沙坡" },
+    { "层层起伏的岩石", "渐渐没入深处" },
+    { "珊瑚依附岩壁", "中间是开阔水道" },
+    { "从洞穴中望出去", "是一片辽阔海洋" },
 };
 void bg_words(int bg, const char **l1, const char **l2) { if ((unsigned)bg >= BG_N) bg = 0; *l1 = BG_WORDS[bg][0]; *l2 = BG_WORDS[bg][1]; }
 int bg_layers(int bg) { return (unsigned)bg < BG_N ? BG_LAYERS[bg] : 0; }

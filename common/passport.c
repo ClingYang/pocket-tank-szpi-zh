@@ -82,18 +82,18 @@ void passport_clean_tank_name(char *dst, const char *src) {
 }
 void passport_home_waters(uint32_t home_tank, char *out, int cap) {
     /* (Strato 11-01: no word that sounds like a gadget - CHANNEL, STREAM, CURRENT, BANK, DOCKS and POINT were swapped out) */
-    static const char *const A[64] = { "AMBER","AZURE","CORAL","PEARL","MISTY","SUNNY","QUIET","SILVER","GOLDEN","MOSSY","SANDY","BRIGHT","SALTY","BREEZY","CALM","DEEP",
-        "STARRY","LUNAR","MINTY","MAPLE","CEDAR","OPAL","JADE","RUBY","COBALT","INDIGO","VELVET","MERRY","LUCKY","HAPPY","SWIFT","GENTLE","HIDDEN","SLEEPY","DREAMY","COZY",
-        "CRISP","FROSTY","HONEY","LEMON","OLIVE","PLUM","TIDAL","PEBBLE","WARM","CLEAR","ROSY","DUSKY","DAWN","NORTH","SOUTH","EAST","WEST","MOON","SUN","STAR","CLOUD",
-        "RAIN","SNOW","WIND","SPRING","SUMMER","AUTUMN","WINTER" };
-    static const char *const P[64] = { "COVE","REEF","BAY","LAGOON","SHOAL","HOLLOW","HARBOR","INLET","CREEK","BROOK","POOL","POND","RIVER","DELTA","SOUND","KEY","ISLE",
-        "ATOLL","TIDEPOOL","BASIN","BEACH","BLUFF","CAPE","CAVE","SHALLOWS","DEPTHS","DUNES","FALLS","FJORD","GARDEN","GROTTO","GULF","HAVEN","LAKE","MARSH","MEADOW","NOOK",
-        "OASIS","PIER","COVES","RAPIDS","RIDGE","SANDS","SHORE","STRAIT","GROVE","TIDES","VALLEY","WATERS","WELLS","WHARF","BAYOU","CANAL","EDDY","GLEN","SPRINGS",
-        "ISLAND","MOORINGS","LANDING","KELP","WAVES","COAST","SURF","ROCKS" };
+    static const char *const A[64] = { "琥珀","蔚蓝","珊瑚","珍珠","薄雾","晴朗","宁静","银色","金色","青苔","沙色","明亮","咸风","微风","平静","深蓝",
+        "星光","月色","薄荷","枫叶","雪松","欧泊","碧玉","红宝","钴蓝","靛蓝","丝绒","欢欣","幸运","欢乐","轻快","温柔","隐秘","安眠","梦幻","温馨",
+        "清新","霜色","蜂蜜","柠檬","橄榄","紫李","潮汐","卵石","暖阳","清澈","玫瑰","暮色","晨曦","北方","南方","东方","西方","月亮","太阳","星辰","云朵",
+        "雨露","白雪","清风","春日","夏日","秋日","冬日" };
+    static const char *const P[64] = { "小湾","礁地","海湾","潟湖","浅滩","幽谷","港湾","水口","小溪","溪涧","水潭","池塘","河流","三角洲","海峡","沙洲","小岛",
+        "环礁","潮池","盆地","沙滩","岩崖","海角","洞穴","浅水","深海","沙丘","瀑布","峡湾","花园","岩洞","海湾","避风港","湖泊","沼泽","草甸","幽角",
+        "绿洲","码头","湾群","急流","山脊","沙地","海岸","水道","林地","潮水","山谷","水域","水井","栈桥","河湾","运河","回流","山涧","泉水",
+        "岛屿","锚地","岸埠","海藻","波浪","海岸","浪花","岩石" };
     if (cap <= 0) return;
-    if (!home_tank) { snprintf(out, (size_t)cap, "FAR WATERS"); return; }
+    if (!home_tank) { snprintf(out, (size_t)cap, "远方水域"); return; }
     uint32_t h = home_tank * 0x9e3779b1u; h ^= h >> 15; h *= 0x85ebca77u; h ^= h >> 13;   /* (an ID's low bits alone would pair neighbors) */
-    snprintf(out, (size_t)cap, "%s %s", A[h & 63], P[(h >> 6) & 63]);
+    snprintf(out, (size_t)cap, "%s%s", A[h & 63], P[(h >> 6) & 63]);
 }
 
 void passport_from_fish(passport_t *p, const fish_t *f, uint32_t home_tank, float age_s) {

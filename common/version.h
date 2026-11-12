@@ -58,7 +58,10 @@
  * (firmware/main/net_port_esp.c, right after the app descriptor) is not its
  * own. The installer offers one manifest per board. PT_BOARD is a file-name
  * safe id; PT_BOARD_NAME is the maker's name for it. */
-#if defined(TANK_ROUND)
+#if defined(TANK_SZPI)
+#define PT_BOARD         "szpi-s3"
+#define PT_BOARD_NAME    "LCKFB SZPI ESP32-S3"
+#elif defined(TANK_ROUND)
 #define PT_BOARD         "round175c"
 #define PT_BOARD_NAME    "ESP32-S3-Touch-AMOLED-1.75C"
 #elif defined(TANK_WATCH)
@@ -75,6 +78,7 @@
  * card, a board's own version offered by CHECK FOR UPDATES); NULL = unknown */
 static inline const char *pt_board_words(const char *id) {
     if (!id) return NULL;
+    if (!strcmp(id, "szpi-s3")) return "SZPI ESP32-S3";
     return !strcmp(id, "amoled18") ? "1.8 INCH" : !strcmp(id, "round175c") ? "1.75 ROUND" :
            !strcmp(id, "watch206") ? "2.06 WATCH" : !strcmp(id, "square216") ? "2.16 SQUARE" : NULL;
 }

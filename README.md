@@ -1,5 +1,27 @@
 # pocket-tank 🐟
 
+## 立创实战派中文移植版
+
+这个社区移植版基于 Strato Doumanis（mediacutlet）的 Pocket Tank v0.4.1，适配立创实战派 ESP32-S3 N16R8、320×240 ST7789 触摸屏和 ESP-IDF 6.0.2。原项目与模型的作者信息和许可证见下方原始说明。感谢作者把这个有趣的项目分享出来。[原项目](https://github.com/mediacutlet/pocket-tank)
+
+- 中文界面与常用汉字字库，首次默认静音，鱼群上限三条。
+- 针对屏幕像素优化文字与鱼体绘制，加入更平滑的轮廓、鳍尾细节与转向动画。
+- 真机验证屏幕、触摸、模型决策和静音。最新短测约 22.7 FPS，1,015 帧中最长间隔 55 毫秒。
+- [移植与构建说明](README_SZPI.md) · [中文操作手册](docs/操作手册.md) · [固件下载](https://github.com/ClingYang/pocket-tank-szpi-zh/releases) · [验证记录](verification/README.md)
+
+![实战派中文设置页](docs/images/szpi-settings.png)
+![实战派中文收藏架](docs/images/szpi-shelf.png)
+
+### 移植者的话
+
+我希望更多人能在自己手里的开发板上，体验到这个有趣的小鱼缸。把移植过程中解决的问题、汉化和固件分享出来，让大家更容易上手，也把能复用的改进贡献回原项目，我觉得这样的分享会让开源更有意义。
+
+本项目沿用 PolyForm Noncommercial License 1.0.0，使用、修改和分享遵循其非商业条款。字体及上游素材保留各自许可证。实现和汉化过程中使用了 AI 辅助，并按验证记录进行构建与实机测试。
+
+---
+
+## 原项目说明
+
 **A tiny language model keeps a fish tank alive on an $8 chip.**
 The ESP32-S3 board, with screen and battery used in this project is actually around $35.
 

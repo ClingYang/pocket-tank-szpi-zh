@@ -3,7 +3,7 @@
 #include "version.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "mbedtls/sha256.h"
+#include "sha256_port.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -35,12 +35,11 @@ bool model_trailer_erase(const esp_partition_t *mp) {
 }
 void model_sha256_hex(const void *p, size_t len, char out[65]) {
     uint8_t d[32];
-    mbedtls_sha256_context c; mbedtls_sha256_init(&c);
-    mbedtls_sha256_starts(&c, 0);
-    /* 64 KB steps: the flash cache walks the mapping in order, and the
-       watchdog sees the gaps (the tank task is not running yet at boot) */
-    for (size_t o = 0; o < len; o += 65536) mbedtls_sha256_update(&c, (const uint8_t *)p + o, len - o < 65536 ? len - o : 65536);
-    mbedtls_sha256_finish(&c, d); mbedtls_sha256_free(&c);
+    if (!sha256_port(p, len, d)) {
+        out[0] = 0;
+        ESP_LOGE(TAG, "SHA-256 failed");
+        return;
+    }
     for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", d[i]);
 }
 static bool hex_to_bytes(const char *hex, uint8_t *out, size_t n) {

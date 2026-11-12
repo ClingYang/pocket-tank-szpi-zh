@@ -78,7 +78,12 @@ bool codec_port_up(void) {
 
 bool codec_port_init(i2c_master_bus_handle_t bus) {
     if (!bus) return false;
-    for (int a = 0x18; a <= 0x19; a++)                /* 0011 00x, x = the CE pin */
+#ifdef CONFIG_POCKET_TANK_SZPI
+    const int last_addr = 0x18; /* 0x19 is the SZPI PCA9557, used for LCD CS and amp enable. */
+#else
+    const int last_addr = 0x19;
+#endif
+    for (int a = 0x18; a <= last_addr; a++)           /* 0011 00x, x = the CE pin */
         if (i2c_master_probe(bus, a, 50) == ESP_OK) { s_addr = a; break; }
     if (!s_addr) { ESP_LOGW(TAG, "no ES8311 at 0x18/0x19"); return false; }
     i2c_device_config_t cfg = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = s_addr, .scl_speed_hz = 400000 };
@@ -97,8 +102,13 @@ bool codec_port_init(i2c_master_bus_handle_t bus) {
    microphone inputs and both bias pairs off, the analog block down, every
    clock gated, then the chip's own power-down */
 bool codec_port_mic_adc_down(i2c_master_bus_handle_t bus) {
-    if (!bus || i2c_master_probe(bus, 0x40, 50) != ESP_OK) return false;
-    i2c_device_config_t cfg = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = 0x40, .scl_speed_hz = 400000 };
+#ifdef CONFIG_POCKET_TANK_SZPI
+    const uint8_t address = 0x41;
+#else
+    const uint8_t address = 0x40;
+#endif
+    if (!bus || i2c_master_probe(bus, address, 50) != ESP_OK) return false;
+    i2c_device_config_t cfg = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = address, .scl_speed_hz = 400000 };
     i2c_master_dev_handle_t dev;
     if (i2c_master_bus_add_device(bus, &cfg, &dev) != ESP_OK) return false;
     static const uint8_t seq[][2] = {
@@ -109,6 +119,6 @@ bool codec_port_mic_adc_down(i2c_master_bus_handle_t bus) {
     for (size_t i = 0; i < sizeof seq / sizeof *seq; i++) ok &= i2c_master_transmit(dev, seq[i], 2, 100) == ESP_OK;
     uint8_t reg = 0x06, r06 = 0; i2c_master_transmit_receive(dev, &reg, 1, &r06, 1, 100);
     i2c_master_bus_rm_device(dev);
-    ESP_LOGI(TAG, "ES7210 @0x40 suspended%s (POWER_DOWN %02x)", ok ? "" : " - a write FAILED", r06);
+    ESP_LOGI(TAG, "ES7210 @0x%02x suspended%s (POWER_DOWN %02x)", address, ok ? "" : " - a write FAILED", r06);
     return ok;
 }

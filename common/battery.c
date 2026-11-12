@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* battery.c — the battery page's history and estimates (battery.h). */
 #include "battery.h"
 #include <stdio.h>
@@ -106,12 +107,12 @@ void battery_info(const bat_t *b, int64_t now, int pct, int mv, int state, bat_i
 
 void battery_fmt_dur(char *buf, int n, int min) {
     if (min < 0) snprintf(buf, n, "-");
-    else if (min < 60) snprintf(buf, n, "%dM", min);
+    else if (min < 60) snprintf(buf, n, "%d分", min);
     else if (min < 24 * 60) {
-        if (min % 60) snprintf(buf, n, "%dH %dM", min / 60, min % 60);
-        else snprintf(buf, n, "%dH", min / 60);
+        if (min % 60) snprintf(buf, n, "%d时%d分", min / 60, min % 60);
+        else snprintf(buf, n, "%d时", min / 60);
     } else {
         int d = min / 1440, hh = min % 1440 / 60;
-        if (hh) snprintf(buf, n, "%dD %dH", d, hh); else snprintf(buf, n, "%dD", d);
+        if (hh) snprintf(buf, n, "%d天%d时", d, hh); else snprintf(buf, n, "%d天", d);
     }
 }

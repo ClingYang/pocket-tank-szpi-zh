@@ -1,3 +1,4 @@
+#include "ui_text.h"
 /* notice.c - the announcement queue. See notice.h. */
 #include "notice.h"
 #include "progression.h"                 /* (progression_newest: a count notice's fish) */
